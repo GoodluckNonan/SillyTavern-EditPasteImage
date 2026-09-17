@@ -5,6 +5,7 @@
     "Image upload failed: ${0}": "Image upload failed: ${0}",
     "The previous image is still uploading…": "The previous image is still uploading…",
     "Failed to download the image.": "Failed to download the image.",
+    "The app did not take over the download. Update TauriTavern and try again.": "The app did not take over the download. Update TauriTavern and try again.",
     "Download image": "Download image",
     "Image compressed to ${0}.": "Image compressed to ${0}.",
     "Compressed ${0} images; the last one is ${1}.": "Compressed ${0} images; the last one is ${1}.",

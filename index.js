@@ -92,8 +92,14 @@ const SYNC_INTERVAL_MS = 500;
 const DOWNLOAD_BUTTON_CLASS = 'tt-editpaste-download';
 const DOWNLOAD_DONE_ATTR = 'data-tt-editpaste-download';
 const DOWNLOAD_ICON_IDLE = 'fa-download';
-const DOWNLOAD_ICON_BUSY = 'fa-spinner fa-spin';
+const DOWNLOAD_ICON_BUSY = ['fa-spinner', 'fa-spin'];
 const DOWNLOAD_ICON_DONE = 'fa-check';
+
+/** How long a temporary download URL stays alive so the host can pick it up. */
+const DOWNLOAD_BLOB_TTL_MS = 30000;
+
+/** Paths that always belong to the local SillyTavern server. */
+const LOCAL_MEDIA_PATH_PREFIXES = ['/user/', '/thumbnails/', '/characters/', '/backgrounds/', '/api/'];
 
 /* ------------------------------------------------------------------ */
 /* settings                                                            */
@@ -1499,31 +1505,154 @@ export function fileNameFromImageUrl(url) {
 }
 
 /**
- * Downloads an image through the host's download bridge.
- *
- * The anchor carries a `download` attribute on purpose: on TauriTavern mobile
- * the host patches `HTMLAnchorElement.click` and the document click listener,
- * and routes such downloads through its native save flow (Android writes to the
- * public Downloads folder or opens the system save dialog, iOS opens the share
- * sheet) with its own success/failure toast. Everywhere else the browser simply
- * saves the file, which is the same thing a long press offers upstream.
- *
- * `URL.createObjectURL` is deliberately not used: it would hand the download to
- * the host's synchronous in-memory blob lookup instead of its own fetch path.
- *
- * @param {string} url image URL (already served by the host)
- * @param {string} [name] optional file name
- * @returns {Promise<{ok: boolean, url: string, name: string}>}
+ * Reads `window.location.href`, tolerating a host without one.
+ * @returns {string}
  */
-export function downloadImageUrl(url, name) {
-    const href = String(url || '').trim();
-    if (!href) {
-        return Promise.resolve({ ok: false, url: href, name: '' });
+function currentLocationHref() {
+    try {
+        return String((window.location && window.location.href) || '');
+    } catch (error) {
+        return '';
+    }
+}
+
+/**
+ * Reads `window.location.origin`, tolerating a host without one.
+ * @returns {string}
+ */
+function currentLocationOrigin() {
+    try {
+        return String((window.location && window.location.origin) || '');
+    } catch (error) {
+        return '';
+    }
+}
+
+/**
+ * Keeps the download href on the host's own origin.
+ *
+ * The host's download bridge refuses anchors that point anywhere else and then
+ * does nothing at all, so a URL that only differs by host alias (localhost vs
+ * 127.0.0.1) is rewritten to its path. Genuinely remote URLs are handed over
+ * untouched, because for those the browser is the only thing that can help.
+ *
+ * @param {string} url
+ * @returns {string}
+ */
+export function normalizeDownloadHref(url) {
+    const raw = String(url || '').trim();
+    if (!raw || raw.startsWith('blob:') || raw.startsWith('data:')) {
+        return raw;
     }
 
-    const fileName = fileNameFromImageUrl(name || href);
+    const base = currentLocationHref();
+    if (!base) {
+        return raw;
+    }
+
+    let parsed = null;
+    try {
+        parsed = new URL(raw, base);
+    } catch (error) {
+        return raw;
+    }
+
+    if (parsed.origin === currentLocationOrigin()) {
+        return raw;
+    }
+
+    for (const prefix of LOCAL_MEDIA_PATH_PREFIXES) {
+        if (parsed.pathname.startsWith(prefix)) {
+            return parsed.pathname + parsed.search;
+        }
+    }
+
+    return parsed.href;
+}
+
+/**
+ * Fetches the image bytes so the host can save them straight from memory.
+ *
+ * On TauriTavern mobile the host keeps a map of every `URL.createObjectURL`
+ * result, and a `blob:` anchor skips both its own second fetch and its same
+ * origin check. When the bytes cannot be read the caller falls back to the URL.
+ *
+ * @param {string} href
+ * @returns {Promise<Blob|null>}
+ */
+async function readImageBlob(href) {
+    if (typeof fetch !== 'function') {
+        return null;
+    }
+
+    try {
+        const response = await fetch(href);
+        if (response && response.ok && typeof response.blob === 'function') {
+            return await response.blob();
+        }
+        log('Image payload request was refused', response ? response.status : 'no response');
+    } catch (error) {
+        log('Image payload request failed', error);
+    }
+
+    return null;
+}
+
+/**
+ * Frees a temporary download URL once the host has had time to pick it up.
+ * @param {string} objectUrl
+ */
+function releaseObjectUrl(objectUrl) {
+    if (!objectUrl) {
+        return;
+    }
+
+    window.setTimeout(() => {
+        try {
+            URL.revokeObjectURL(objectUrl);
+        } catch (error) {
+            log('Failed to release the download URL', error);
+        }
+    }, DOWNLOAD_BLOB_TTL_MS);
+}
+
+/**
+ * Reports whether an href already points at the host itself.
+ *
+ * Relative hrefs count, because the browser resolves them against the page.
+ * @param {string} href
+ * @returns {boolean}
+ */
+function isSameOriginHref(href) {
+    const origin = currentLocationOrigin();
+    if (!origin) {
+        return true;
+    }
+
+    try {
+        return new URL(href, currentLocationHref() || origin).origin === origin;
+    } catch (error) {
+        return true;
+    }
+}
+
+/**
+ * Creates the download anchor, clicks it and reports what happened.
+ *
+ * The host bridges downloads from a capture phase listener on `document`, which
+ * calls `preventDefault()`. Reading that flag from our own listener is the only
+ * way to tell "the host is saving this" apart from "nothing will happen".
+ *
+ * @param {string} href the image URL, for reporting
+ * @param {string} anchorHref where the anchor should point
+ * @param {string} fileName
+ * @param {'direct'|'blob'} mode
+ * @param {string} [objectUrl] temporary URL to release once the host looked at it
+ * @returns {{ok: boolean, bridged: boolean, url: string, name: string, mode: string}}
+ */
+function clickDownloadAnchor(href, anchorHref, fileName, mode, objectUrl) {
     const anchor = document.createElement('a');
-    anchor.href = href;
+    anchor.href = anchorHref;
     anchor.setAttribute('download', fileName);
     anchor.rel = 'noopener';
     anchor.style.display = 'none';
@@ -1531,33 +1660,120 @@ export function downloadImageUrl(url, name) {
     // Must be connected so the host's document level listener sees the click.
     document.body.appendChild(anchor);
 
+    let dispatched = false;
+    let prevented = false;
+    const onAnchorClick = (event) => {
+        dispatched = true;
+        prevented = Boolean(event.defaultPrevented);
+    };
+
+    anchor.addEventListener('click', onAnchorClick);
+    let bridged = false;
     try {
         anchor.click();
+        // A host that swallows the click inside its own `click` patch never dispatches.
+        bridged = dispatched ? prevented : true;
     } finally {
+        anchor.removeEventListener('click', onAnchorClick);
         anchor.remove();
     }
 
-    log('Downloading image', fileName, 'from', href);
-    return Promise.resolve({ ok: true, url: href, name: fileName });
+    releaseObjectUrl(objectUrl);
+    return { ok: true, bridged, url: href, name: fileName, mode };
 }
 
 /**
- * Swaps the control icon through a short busy/confirmed sequence.
- * @param {Element} control
+ * Downloads an image through the host's download bridge.
+ *
+ * The anchor carries a `download` attribute on purpose: on TauriTavern mobile
+ * the host patches `HTMLAnchorElement.click`, tracks `URL.createObjectURL`
+ * results and listens for download clicks at document level, routing them
+ * through its native save flow (Android writes to the public Downloads folder or
+ * opens the system save dialog, iOS opens the share sheet) with its own
+ * success/failure toast. Everywhere else the browser simply saves the file,
+ * which is the same thing a long press offers upstream.
+ *
+ * A local URL is what that bridge expects, and the click has to stay inside the
+ * user gesture, so that path never waits for anything. Only a URL that still
+ * points somewhere else after normalisation is read into a blob first, because
+ * the bridge refuses those outright.
+ *
+ * @param {string} url image URL (already served by the host)
+ * @param {string} [name] optional file name
+ * @returns {Promise<{ok: boolean, bridged: boolean, url: string, name: string, mode: string}>}
  */
-function flashDownloadControl(control) {
-    const icon = control.querySelector('i') || control;
-    icon.classList.remove(DOWNLOAD_ICON_IDLE, DOWNLOAD_ICON_DONE);
-    icon.classList.add('fa-spinner', 'fa-spin');
+export async function downloadImageUrl(url, name) {
+    const source = String(url || '').trim();
+    const href = normalizeDownloadHref(source);
+    if (!href) {
+        return { ok: false, bridged: false, url: href, name: '', mode: 'none' };
+    }
 
-    window.setTimeout(() => {
-        icon.classList.remove('fa-spinner', 'fa-spin');
+    const fileName = fileNameFromImageUrl(name || source || href);
+
+    if (isSameOriginHref(href)) {
+        log('Downloading image', fileName, 'from', href, '(direct)');
+        return clickDownloadAnchor(href, href, fileName, 'direct');
+    }
+
+    let objectUrl = '';
+    const blob = await readImageBlob(href);
+    if (blob) {
+        try {
+            objectUrl = URL.createObjectURL(blob);
+        } catch (error) {
+            log('Failed to create a download URL', error);
+            objectUrl = '';
+        }
+    }
+
+    const mode = objectUrl ? 'blob' : 'direct';
+    log('Downloading image', fileName, 'from', href, '(' + mode + ')');
+    return clickDownloadAnchor(href, objectUrl || href, fileName, mode, objectUrl);
+}
+
+/**
+ * Reports whether the app is a mobile Tauri shell, where a download that no host
+ * bridge picked up would otherwise fail without any feedback at all.
+ * @returns {boolean}
+ */
+function isNativeMobileShell() {
+    try {
+        if (!window.__TAURI_INTERNALS__ && !window.__TAURI__) {
+            return false;
+        }
+        const userAgent = String((window.navigator && window.navigator.userAgent) || '');
+        return /android|iphone|ipad|ipod/i.test(userAgent);
+    } catch (error) {
+        return false;
+    }
+}
+
+/**
+ * Swaps the control icon: busy while the hand off runs, a short tick on success,
+ * and the idle download arrow the rest of the time.
+ * @param {Element} control
+ * @param {'busy'|'done'|'idle'} state
+ */
+function markDownloadControl(control, state) {
+    const icon = control.querySelector('i') || control;
+    icon.classList.remove(DOWNLOAD_ICON_IDLE, DOWNLOAD_ICON_DONE, ...DOWNLOAD_ICON_BUSY);
+
+    if (state === 'busy') {
+        icon.classList.add(...DOWNLOAD_ICON_BUSY);
+        return;
+    }
+
+    if (state === 'done') {
         icon.classList.add(DOWNLOAD_ICON_DONE);
         window.setTimeout(() => {
             icon.classList.remove(DOWNLOAD_ICON_DONE);
             icon.classList.add(DOWNLOAD_ICON_IDLE);
         }, 1200);
-    }, 400);
+        return;
+    }
+
+    icon.classList.add(DOWNLOAD_ICON_IDLE);
 }
 
 /**
@@ -1579,14 +1795,22 @@ async function onDownloadControlClick(event) {
     }
 
     control.setAttribute(DOWNLOAD_DONE_ATTR, 'busy');
+    // Acknowledge the tap right away: the payload may have to be fetched first.
+    markDownloadControl(control, 'busy');
+
     try {
         const result = await downloadImageUrl(src);
-        if (result.ok) {
-            flashDownloadControl(control);
+        if (result.ok && !result.bridged && isNativeMobileShell()) {
+            console.error(DEBUG_PREFIX, 'the app did not take over the download', result);
+            notify('warning', 'The app did not take over the download. Update TauriTavern and try again.');
+            markDownloadControl(control, 'idle');
+        } else {
+            markDownloadControl(control, 'done');
         }
     } catch (error) {
         console.error(DEBUG_PREFIX, 'download failed', error);
         notify('error', 'Failed to download the image.');
+        markDownloadControl(control, 'idle');
     } finally {
         window.setTimeout(() => {
             control.removeAttribute(DOWNLOAD_DONE_ATTR);
