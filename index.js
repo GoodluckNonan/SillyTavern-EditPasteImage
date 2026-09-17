@@ -88,6 +88,13 @@ const COMPRESSION_QUALITY_STEPS = 10;
 /** Poll interval (ms) for reconciling the edit box UI with the DOM. */
 const SYNC_INTERVAL_MS = 500;
 
+/** Injected download control, mirroring upstream's media controls. */
+const DOWNLOAD_BUTTON_CLASS = 'tt-editpaste-download';
+const DOWNLOAD_DONE_ATTR = 'data-tt-editpaste-download';
+const DOWNLOAD_ICON_IDLE = 'fa-download';
+const DOWNLOAD_ICON_BUSY = 'fa-spinner fa-spin';
+const DOWNLOAD_ICON_DONE = 'fa-check';
+
 /* ------------------------------------------------------------------ */
 /* settings                                                            */
 /* ------------------------------------------------------------------ */
@@ -1082,11 +1089,13 @@ function syncEditors() {
     if (!editor) {
         OPEN_EDITOR_MESSAGE_ID.clear();
         clearDragHighlights();
-        return;
+    } else {
+        OPEN_EDITOR_MESSAGE_ID.clear();
+        OPEN_EDITOR_MESSAGE_ID.set(editor.messageId, editor.mes);
     }
 
-    OPEN_EDITOR_MESSAGE_ID.clear();
-    OPEN_EDITOR_MESSAGE_ID.set(editor.messageId, editor.mes);
+    // Runs whether or not an editor is open: images appear in finished messages.
+    enhanceImageContainers();
 }
 
 /**
@@ -1455,6 +1464,168 @@ function startSync() {
         }
         onDrop(event).catch((error) => console.error(DEBUG_PREFIX, 'drop handler failed', error));
     }), true);
+}
+
+/* ------------------------------------------------------------------ */
+/* image download (host download bridge)                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Turns an image URL into a safe file name.
+ * @param {string} url
+ * @returns {string}
+ */
+export function fileNameFromImageUrl(url) {
+    let candidate = '';
+    try {
+        const parsed = new URL(String(url), 'https://localhost/');
+        candidate = decodeURIComponent(parsed.pathname.split('/').pop() || '');
+    } catch (error) {
+        candidate = String(url || '').split('/').pop() || '';
+    }
+
+    const cleaned = candidate
+        .replace(/[\\/:*?"<>|]+/g, '_')
+        .replace(/[.\s]+$/g, '')
+        .trim();
+
+    if (!cleaned) {
+        return 'image.png';
+    }
+    if (!/\.[a-z0-9]{2,5}$/i.test(cleaned)) {
+        return cleaned + '.png';
+    }
+    return cleaned;
+}
+
+/**
+ * Downloads an image through the host's download bridge.
+ *
+ * The anchor carries a `download` attribute on purpose: on TauriTavern mobile
+ * the host patches `HTMLAnchorElement.click` and the document click listener,
+ * and routes such downloads through its native save flow (Android writes to the
+ * public Downloads folder or opens the system save dialog, iOS opens the share
+ * sheet) with its own success/failure toast. Everywhere else the browser simply
+ * saves the file, which is the same thing a long press offers upstream.
+ *
+ * `URL.createObjectURL` is deliberately not used: it would hand the download to
+ * the host's synchronous in-memory blob lookup instead of its own fetch path.
+ *
+ * @param {string} url image URL (already served by the host)
+ * @param {string} [name] optional file name
+ * @returns {Promise<{ok: boolean, url: string, name: string}>}
+ */
+export function downloadImageUrl(url, name) {
+    const href = String(url || '').trim();
+    if (!href) {
+        return Promise.resolve({ ok: false, url: href, name: '' });
+    }
+
+    const fileName = fileNameFromImageUrl(name || href);
+    const anchor = document.createElement('a');
+    anchor.href = href;
+    anchor.setAttribute('download', fileName);
+    anchor.rel = 'noopener';
+    anchor.style.display = 'none';
+
+    // Must be connected so the host's document level listener sees the click.
+    document.body.appendChild(anchor);
+
+    try {
+        anchor.click();
+    } finally {
+        anchor.remove();
+    }
+
+    log('Downloading image', fileName, 'from', href);
+    return Promise.resolve({ ok: true, url: href, name: fileName });
+}
+
+/**
+ * Swaps the control icon through a short busy/confirmed sequence.
+ * @param {Element} control
+ */
+function flashDownloadControl(control) {
+    const icon = control.querySelector('i') || control;
+    icon.classList.remove(DOWNLOAD_ICON_IDLE, DOWNLOAD_ICON_DONE);
+    icon.classList.add('fa-spinner', 'fa-spin');
+
+    window.setTimeout(() => {
+        icon.classList.remove('fa-spinner', 'fa-spin');
+        icon.classList.add(DOWNLOAD_ICON_DONE);
+        window.setTimeout(() => {
+            icon.classList.remove(DOWNLOAD_ICON_DONE);
+            icon.classList.add(DOWNLOAD_ICON_IDLE);
+        }, 1200);
+    }, 400);
+}
+
+/**
+ * Handles a click on the injected download control.
+ * @param {MouseEvent} event
+ * @returns {Promise<void>}
+ */
+async function onDownloadControlClick(event) {
+    const control = event.currentTarget;
+    if (!control || control.getAttribute(DOWNLOAD_DONE_ATTR) === 'busy') {
+        return;
+    }
+
+    const container = control.closest('.mes_img_container') || control.parentElement;
+    const image = container ? container.querySelector('img') : null;
+    const src = image ? String(image.getAttribute('src') || '') : '';
+    if (!src) {
+        return;
+    }
+
+    control.setAttribute(DOWNLOAD_DONE_ATTR, 'busy');
+    try {
+        const result = await downloadImageUrl(src);
+        if (result.ok) {
+            flashDownloadControl(control);
+        }
+    } catch (error) {
+        console.error(DEBUG_PREFIX, 'download failed', error);
+        notify('error', 'Failed to download the image.');
+    } finally {
+        window.setTimeout(() => {
+            control.removeAttribute(DOWNLOAD_DONE_ATTR);
+        }, 1500);
+    }
+}
+
+/**
+ * Adds the download control to every rendered image, appending it to the
+ * host's own media controls so it sits next to expand / caption / delete.
+ *
+ * The control is inserted once per image. When upstream ever ships its own
+ * download button, the lookup below finds it and this becomes a no-op.
+ */
+function enhanceImageContainers() {
+    const images = document.querySelectorAll('.mes_img_container');
+    for (const container of images) {
+        const controls = container.querySelector('.mes_img_controls');
+        if (!controls || controls.querySelector('.' + DOWNLOAD_BUTTON_CLASS)) {
+            continue;
+        }
+
+        const control = document.createElement('div');
+        control.className = 'right_menu_button fa-lg fa-solid ' + DOWNLOAD_ICON_IDLE + ' '
+            + DOWNLOAD_BUTTON_CLASS;
+        control.setAttribute('title', translateText('Download image'));
+        control.setAttribute('role', 'button');
+        control.setAttribute('tabindex', '0');
+        control.addEventListener('click', (event) => {
+            // Keep the host's message level click handlers out of this.
+            event.preventDefault();
+            event.stopPropagation();
+            onDownloadControlClick(event).catch((error) => {
+                console.error(DEBUG_PREFIX, 'download control failed', error);
+            });
+        });
+
+        controls.appendChild(control);
+    }
 }
 
 /* ------------------------------------------------------------------ */

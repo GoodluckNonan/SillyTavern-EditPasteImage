@@ -4,6 +4,8 @@
     "The message to edit was not found.": "找不到要编辑的消息。",
     "Image upload failed: ${0}": "图片上传失败：${0}",
     "The previous image is still uploading…": "上一张图片还在上传中…",
+    "Failed to download the image.": "图片下载失败。",
+    "Download image": "下载图片",
     "Image compressed to ${0}.": "已自动将图片压缩至 ${0}。",
     "Compressed ${0} images; the last one is ${1}.": "已自动压缩 ${0} 张图片，最后一张为 ${1}。",
 
