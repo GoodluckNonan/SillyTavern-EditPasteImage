@@ -1,0 +1,19 @@
+{
+    "Image is larger than ${0} MB and was not attached.": "Image is larger than ${0} MB and was not attached.",
+    "SillyTavern is not ready yet, please try again in a moment.": "SillyTavern is not ready yet, please try again in a moment.",
+    "The message to edit was not found.": "The message to edit was not found.",
+    "Image upload failed: ${0}": "Image upload failed: ${0}",
+    "The previous image is still uploading…": "The previous image is still uploading…",
+    "Image compressed to ${0}.": "Image compressed to ${0}.",
+    "Compressed ${0} images; the last one is ${1}.": "Compressed ${0} images; the last one is ${1}.",
+
+    "Enable paste and drop in the message editor": "Enable paste and drop in the message editor",
+    "Maximum size per image (MB)": "Maximum size per image (MB)",
+    "Compress images automatically": "Compress images automatically",
+    "Target size after compression (KB)": "Target size after compression (KB)",
+    "Also limit the long edge": "Also limit the long edge",
+    "Maximum long edge after compression (px)": "Maximum long edge after compression (px)",
+    "Minimum quality (lower bound)": "Minimum quality (lower bound)",
+    "Images that are already within the size limit are left untouched. Compression re-encodes to WebP, falls back to JPEG when WebP is unsupported, and removes metadata such as EXIF. Quality is lowered first; the image is only scaled down when the lowest acceptable quality is still too large.": "Images that are already within the size limit are left untouched. Compression re-encodes to WebP, falls back to JPEG when WebP is unsupported, and removes metadata such as EXIF. Quality is lowered first; the image is only scaled down when the lowest acceptable quality is still too large.",
+    "Paste an image into the message editor with Ctrl+V, or drag an image into the editor. The unsent input box behaves the same way.": "Paste an image into the message editor with Ctrl+V, or drag an image into the editor. The unsent input box behaves the same way."
+}

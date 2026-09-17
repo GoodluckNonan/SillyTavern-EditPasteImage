@@ -1,0 +1,15 @@
+# 這個 repo 只放擴展本體：manifest.json / index.js / style.css / README.md / LICENSE
+# 開發輔助（測試載具、靜態檢查、筆記）都在上層工作區，不在這裡。
+
+# 編輯器與系統暫存
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 日誌
+*.log
+
+# 依賴與建置產物（本擴展不需要，但避免手滑提交）
+node_modules/

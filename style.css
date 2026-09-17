@@ -1,0 +1,26 @@
+/**
+ * Edit Message Paste Image — styles.
+ *
+ * The extension injects no UI of its own any more; the only thing that needs
+ * styling is the drag hover highlight. Scoped under `.tt-editpaste-*` so nothing
+ * leaks into the host UI. Uses ST's own CSS variables with plain fallbacks for
+ * old WebViews (Android System WebView on mobile builds).
+ */
+
+.tt-editpaste-drag,
+.edit_textarea.tt-editpaste-drag {
+    outline: 2px dashed var(--SmartThemeQuoteColor, #7aa2f7);
+    outline-offset: 2px;
+}
+
+.tt-editpaste-settings .checkbox_label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.tt-editpaste-settings small {
+    display: block;
+    margin-top: 6px;
+    opacity: 0.75;
+}

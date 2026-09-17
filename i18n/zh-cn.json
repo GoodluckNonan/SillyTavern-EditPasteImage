@@ -1,0 +1,19 @@
+{
+    "Image is larger than ${0} MB and was not attached.": "图片超过 ${0} MB，未粘贴。",
+    "SillyTavern is not ready yet, please try again in a moment.": "酒馆还没准备好，请稍后再试。",
+    "The message to edit was not found.": "找不到要编辑的消息。",
+    "Image upload failed: ${0}": "图片上传失败：${0}",
+    "The previous image is still uploading…": "上一张图片还在上传中…",
+    "Image compressed to ${0}.": "已自动将图片压缩至 ${0}。",
+    "Compressed ${0} images; the last one is ${1}.": "已自动压缩 ${0} 张图片，最后一张为 ${1}。",
+
+    "Enable paste and drop in the message editor": "启用编辑框粘贴／拖放",
+    "Maximum size per image (MB)": "单张图片大小上限（MB）",
+    "Compress images automatically": "自动压缩图片",
+    "Target size after compression (KB)": "压缩后文件大小上限（KB）",
+    "Also limit the long edge": "同时限制长边尺寸",
+    "Maximum long edge after compression (px)": "压缩后长边最大尺寸（px）",
+    "Minimum quality (lower bound)": "最低可接受画质",
+    "Images that are already within the size limit are left untouched. Compression re-encodes to WebP, falls back to JPEG when WebP is unsupported, and removes metadata such as EXIF. Quality is lowered first; the image is only scaled down when the lowest acceptable quality is still too large.": "图片不超过大小上限时不做任何处理。压缩会重新编码为 WebP（浏览器不支持时退回 JPEG），并清除 EXIF 等元数据。优先降低画质，只有当画质降到下限仍然超标时才会缩小尺寸。",
+    "Paste an image into the message editor with Ctrl+V, or drag an image into the editor. The unsent input box behaves the same way.": "在编辑框（铅笔图标）内按 Ctrl+V 粘贴，或把图片拖进编辑框；未送出的输入框同样有效。"
+}
