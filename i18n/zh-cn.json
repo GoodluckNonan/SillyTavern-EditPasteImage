@@ -15,6 +15,7 @@
     "Download image": "下载图片",
     "Image compressed to ${0}.": "已自动将图片压缩至 ${0}。",
     "Compressed ${0} images; the last one is ${1}.": "已自动压缩 ${0} 张图片，最后一张为 ${1}。",
+    "${0} files selected": "已选择 ${0} 个文件",
 
     "Enable paste and drop in the message editor": "启用编辑框粘贴／拖放",
     "Maximum size per image (MB)": "单张图片大小上限（MB）",

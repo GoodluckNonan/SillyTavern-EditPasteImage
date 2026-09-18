@@ -15,6 +15,7 @@
     "Download image": "Download image",
     "Image compressed to ${0}.": "Image compressed to ${0}.",
     "Compressed ${0} images; the last one is ${1}.": "Compressed ${0} images; the last one is ${1}.",
+    "${0} files selected": "${0} files selected",
 
     "Enable paste and drop in the message editor": "Enable paste and drop in the message editor",
     "Maximum size per image (MB)": "Maximum size per image (MB)",

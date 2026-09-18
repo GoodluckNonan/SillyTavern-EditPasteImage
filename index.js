@@ -49,7 +49,7 @@ export const LEGACY_MODULE_NAME = 'edit-paste-image';
 export const DEBUG_PREFIX = '[PCD] ';
 
 /** Reported in the console and the settings drawer; kept in step with manifest.json. */
-export const EXTENSION_VERSION = '1.5.0';
+export const EXTENSION_VERSION = '1.5.1';
 
 /** Hard cap for a single pasted image (25 MB). */
 export const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
@@ -1296,14 +1296,128 @@ function readSendBoxFiles() {
 }
 
 /**
+ * Cached promise for the host's helper module (`null` when unavailable).
+ * @type {Promise<any|null>|null}
+ */
+let hostUtilsPromise = null;
+
+/**
+ * Loads SillyTavern's `/scripts/utils.js` for `humanFileSize`, so the label we
+ * redraw matches the host's own formatting byte for byte.
+ * @returns {Promise<any|null>}
+ */
+function loadHostUtilsModule() {
+    if (!hostUtilsPromise) {
+        hostUtilsPromise = import('../../../utils.js')
+            .then((module) => (module && typeof module.humanFileSize === 'function' ? module : null))
+            .catch((error) => {
+                log('host utils module unavailable, using the built-in size format', error);
+                return null;
+            });
+    }
+
+    return hostUtilsPromise;
+}
+
+/**
+ * Stand-in for `humanFileSize(bytes, si = false, dp = 1)`, mirroring the host's
+ * binary units so a host without the module still renders the same text.
+ * @param {number} bytes
+ * @returns {string}
+ */
+function fallbackFileSize(bytes) {
+    const value = Number(bytes) || 0;
+    const units = ['KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB', 'ZiB', 'YiB'];
+    if (Math.abs(value) < 1024) {
+        return value + ' B';
+    }
+
+    let size = value;
+    let unit = -1;
+    do {
+        size /= 1024;
+        unit++;
+    } while (Math.round(Math.abs(size) * 10) / 10 >= 1024 && unit < units.length - 1);
+
+    return size.toFixed(1) + ' ' + units[unit];
+}
+
+/**
+ * Formats a byte count the way the host's attachment label does.
+ * @param {number} bytes
+ * @returns {Promise<string>}
+ */
+async function formatFileSize(bytes) {
+    const module = await loadHostUtilsModule();
+    if (module && typeof module.humanFileSize === 'function') {
+        try {
+            return String(module.humanFileSize(bytes));
+        } catch (error) {
+            log('humanFileSize failed, using the built-in format', error);
+        }
+    }
+
+    return fallbackFileSize(bytes);
+}
+
+/**
+ * Redraws the host's pending-attachment label after the bytes were swapped.
+ *
+ * Upstream renders `#file_form .file_name` / `.file_size` only from
+ * `onFileAttach()` (`public/scripts/chats.js`), which is module-local and is
+ * reached two different ways: the paste and drag-drop paths call it directly,
+ * while the paperclip button relies on a `change` listener that only exists after
+ * that button was clicked. So there is no event we can fire that reliably
+ * redraws the label — and firing `change` is actively harmful: the button's
+ * listener merges whatever is in `#file_form_input` into a `DataTransfer` it
+ * snapshotted on click, and `isSameFile()` compares name/size/type/lastModified,
+ * so a re-encoded file counts as *new* and the original would be re-added
+ * alongside it. The label is therefore written here, in the host's own format.
+ *
+ * @param {File[]|FileList} files
+ * @returns {Promise<void>}
+ */
+async function refreshAttachmentLabel(files) {
+    const form = document.getElementById('file_form');
+    if (!form) {
+        return;
+    }
+
+    const nameNode = form.querySelector('.file_name');
+    const sizeNode = form.querySelector('.file_size');
+    if (!nameNode || !sizeNode) {
+        return;
+    }
+
+    const list = Array.from(files || []);
+    if (list.length === 0) {
+        form.classList.add('displayNone');
+        return;
+    }
+
+    const name = list.length === 1
+        ? String(list[0].name || '')
+        : fillPlaceholders(translateText('${0} files selected'), list.length);
+    const totalBytes = list.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
+    const title = list.map((file) => String(file.name || '')).join('\n');
+
+    nameNode.textContent = name;
+    nameNode.setAttribute('title', title);
+    sizeNode.textContent = await formatFileSize(totalBytes);
+    sizeNode.setAttribute('title', String(totalBytes));
+    form.classList.remove('displayNone');
+}
+
+/**
  * Optional hook for the unsent input box (`#send_textarea`).
  *
  * The host owns that path: it attaches pasted or dropped files to
  * `#file_form_input` and only turns them into base64 when the message is sent.
  * A paste payload cannot be rewritten in flight, so the compression happens
  * right after the host attached the files, and the result is written straight
- * back into the same input. The host's own attachment UI, preview and multi
- * file merging stay in charge; only the bytes change.
+ * back into the same input. The host's own multi-file merging stays in charge;
+ * only the bytes change, plus the label that would otherwise keep describing the
+ * pre-compression file.
  *
  * @returns {Promise<void>}
  */
@@ -1342,8 +1456,9 @@ async function compressSendBoxAttachments() {
             }
             const input = document.getElementById('file_form_input');
             if (input) {
+                // Deliberately no `change` event: see `refreshAttachmentLabel`.
                 input.files = transfer.files;
-                input.dispatchEvent(new Event('change', { bubbles: true }));
+                await refreshAttachmentLabel(transfer.files);
             }
             reportCompression(compressedCount, lastBytes);
             log('Compressed', compressedCount, 'image(s) for the unsent input box');
