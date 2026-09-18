@@ -8,6 +8,9 @@
     "Failed to download the image: ${0}": "图片下载失败：${0}",
     "Download failed: ${0} The image was opened instead.": "下载失败：${0} 已改为直接打开图片。",
     "Image saved: ${0}": "已保存图片：${0}",
+    "Save this image to your device?": "是否下载这张图片？",
+    "Download": "下载",
+    "Cancel": "取消",
     "The app did not take over the download. Update TauriTavern and try again.": "应用没有接管这次下载，请更新 TauriTavern 后重试。",
     "Download image": "下载图片",
     "Image compressed to ${0}.": "已自动将图片压缩至 ${0}。",
@@ -20,6 +23,8 @@
     "Also limit the long edge": "同时限制长边尺寸",
     "Maximum long edge after compression (px)": "压缩后长边最大尺寸（px）",
     "Minimum quality (lower bound)": "最低可接受画质",
+    "Hold an image on a touch screen to download it": "触控装置上长按图片下载",
     "Images that are already within the size limit are left untouched. Compression re-encodes to WebP, falls back to JPEG when WebP is unsupported, and removes metadata such as EXIF. Quality is lowered first; the image is only scaled down when the lowest acceptable quality is still too large.": "图片不超过大小上限时不做任何处理。压缩会重新编码为 WebP（浏览器不支持时退回 JPEG），并清除 EXIF 等元数据。优先降低画质，只有当画质降到下限仍然超标时才会缩小尺寸。",
-    "Paste an image into the message editor with Ctrl+V, or drag an image into the editor. The unsent input box behaves the same way.": "在编辑框（铅笔图标）内按 Ctrl+V 粘贴，或把图片拖进编辑框；未送出的输入框同样有效。"
+    "Paste an image into the message editor with Ctrl+V, or drag an image into the editor. The unsent input box behaves the same way.": "在编辑框（铅笔图标）内按 Ctrl+V 粘贴，或把图片拖进编辑框；未送出的输入框同样有效。",
+    "Holding an image asks for confirmation first, so it cannot fire by accident. Only applies on touch screens.": "长按图片会先弹出确认再下载，避免误触。只对触控屏幕有效。"
 }

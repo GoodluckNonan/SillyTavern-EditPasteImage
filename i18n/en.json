@@ -8,6 +8,9 @@
     "Failed to download the image: ${0}": "Failed to download the image: ${0}",
     "Download failed: ${0} The image was opened instead.": "Download failed: ${0} The image was opened instead.",
     "Image saved: ${0}": "Image saved: ${0}",
+    "Save this image to your device?": "Save this image to your device?",
+    "Download": "Download",
+    "Cancel": "Cancel",
     "The app did not take over the download. Update TauriTavern and try again.": "The app did not take over the download. Update TauriTavern and try again.",
     "Download image": "Download image",
     "Image compressed to ${0}.": "Image compressed to ${0}.",
@@ -20,6 +23,8 @@
     "Also limit the long edge": "Also limit the long edge",
     "Maximum long edge after compression (px)": "Maximum long edge after compression (px)",
     "Minimum quality (lower bound)": "Minimum quality (lower bound)",
+    "Hold an image on a touch screen to download it": "Hold an image on a touch screen to download it",
     "Images that are already within the size limit are left untouched. Compression re-encodes to WebP, falls back to JPEG when WebP is unsupported, and removes metadata such as EXIF. Quality is lowered first; the image is only scaled down when the lowest acceptable quality is still too large.": "Images that are already within the size limit are left untouched. Compression re-encodes to WebP, falls back to JPEG when WebP is unsupported, and removes metadata such as EXIF. Quality is lowered first; the image is only scaled down when the lowest acceptable quality is still too large.",
-    "Paste an image into the message editor with Ctrl+V, or drag an image into the editor. The unsent input box behaves the same way.": "Paste an image into the message editor with Ctrl+V, or drag an image into the editor. The unsent input box behaves the same way."
+    "Paste an image into the message editor with Ctrl+V, or drag an image into the editor. The unsent input box behaves the same way.": "Paste an image into the message editor with Ctrl+V, or drag an image into the editor. The unsent input box behaves the same way.",
+    "Holding an image asks for confirmation first, so it cannot fire by accident. Only applies on touch screens.": "Holding an image asks for confirmation first, so it cannot fire by accident. Only applies on touch screens."
 }

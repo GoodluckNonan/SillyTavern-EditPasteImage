@@ -1,10 +1,9 @@
 /**
  * Edit Message Paste Image — styles.
  *
- * Two things need styling: the drag hover highlight, and the download controls
- * (the one appended to the host's own image controls, plus the corner control
- * inside an image viewer). Everything is scoped under `.tt-editpaste-*` so
- * nothing leaks into the host UI. Uses ST's own CSS variables with plain
+ * Two things need styling: the drag hover highlight, and the corner download
+ * control inside an image viewer. Everything is scoped under `.tt-editpaste-*`
+ * so nothing leaks into the host UI. Uses ST's own CSS variables with plain
  * fallbacks for old WebViews (Android System WebView on mobile builds).
  */
 
@@ -15,24 +14,10 @@
 }
 
 /*
- * Inherits the look of `.right_menu_button` from the host; only the touch
- * target is enlarged a little so the control stays reachable on phones.
- */
-.mes_img_controls .tt-editpaste-download {
-    cursor: pointer;
-    touch-action: manipulation;
-    padding-inline: 2px;
-}
-
-.mes_img_controls .tt-editpaste-download[data-tt-editpaste-download="busy"] {
-    pointer-events: none;
-    opacity: 0.7;
-}
-
-/*
  * The corner control inside an image viewer (chat lightbox / gallery window).
- * The host element is made a positioning context; the control sits bottom right
- * of it, well away from the viewer's own close button.
+ * The viewer becomes the positioning context; `right` / `bottom` are then
+ * overwritten from JS with the offsets of the image's own bottom right corner,
+ * so the defaults here only matter for the very first frame.
  */
 .tt-editpaste-viewer {
     position: relative;

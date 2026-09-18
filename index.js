@@ -36,7 +36,7 @@ export const MODULE_NAME = 'edit-paste-image';
 export const DEBUG_PREFIX = '[EditPasteImage] ';
 
 /** Reported in the console and the settings drawer; kept in step with manifest.json. */
-export const EXTENSION_VERSION = '1.4.0';
+export const EXTENSION_VERSION = '1.4.1';
 
 /** Hard cap for a single pasted image (25 MB). */
 export const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
@@ -91,8 +91,7 @@ const COMPRESSION_QUALITY_STEPS = 10;
 /** Poll interval (ms) for reconciling the edit box UI with the DOM. */
 const SYNC_INTERVAL_MS = 500;
 
-/** Injected download control, mirroring upstream's media controls. */
-const DOWNLOAD_BUTTON_CLASS = 'tt-editpaste-download';
+/** Injected download control. */
 const DOWNLOAD_DONE_ATTR = 'data-tt-editpaste-download';
 const DOWNLOAD_ICON_IDLE = 'fa-download';
 const DOWNLOAD_ICON_BUSY = ['fa-spinner', 'fa-spin'];
@@ -111,6 +110,9 @@ const IMAGE_SOURCE_ATTRS = ['data-ngsrc', 'data-src', 'src'];
 const VIEWER_CONTAINER_SELECTORS = ['.img_enlarged_container', '.galleryImageDraggable'];
 const VIEWER_HOST_CLASS = 'tt-editpaste-viewer';
 const VIEWER_BUTTON_CLASS = 'tt-editpaste-viewer-download';
+
+/** Gap (px) between the viewer control and the image's own bottom right corner. */
+const VIEWER_INSET_PX = 12;
 
 /** Selectors whose click opens the chat image lightbox, so we can react to it. */
 const LIGHTBOX_OPENER_SELECTOR = '.mes_img, .mes_media_enlarge';
@@ -136,6 +138,7 @@ const DEFAULT_SETTINGS = {
     compress_limit_dimension: false,
     compress_max_edge: 2000,
     compress_min_quality: 0.5,
+    long_press_download: true,
 };
 
 /**
@@ -178,6 +181,9 @@ export function getSettings() {
         || Number(settings.compress_min_quality) < 0.1
         || Number(settings.compress_min_quality) > 1) {
         settings.compress_min_quality = DEFAULT_SETTINGS.compress_min_quality;
+    }
+    if (typeof settings.long_press_download !== 'boolean') {
+        settings.long_press_download = DEFAULT_SETTINGS.long_press_download;
     }
 
     return settings;
@@ -1128,8 +1134,9 @@ function syncEditors() {
         OPEN_EDITOR_MESSAGE_ID.set(editor.messageId, editor.mes);
     }
 
-    // Runs whether or not an editor is open: images appear in finished messages.
-    enhanceImageContainers();
+    // Runs whether or not an editor is open: images appear in finished messages,
+    // and the lightbox can be open over any of them.
+    enhanceImageViewers();
 }
 
 /**
@@ -1997,6 +2004,37 @@ async function runDownloadAction(feedback, src) {
 }
 
 /**
+ * Pins a viewer control to the image's own bottom right corner.
+ *
+ * The viewer box is usually larger than the picture (letterboxing, `object-fit:
+ * contain`), so anchoring to the box would leave the control floating away from
+ * the image. Offsets are measured against the image instead, and clamped to the
+ * viewer so that a zoomed-in image never pushes the control out of sight.
+ *
+ * @param {Element} container
+ * @param {Element} button
+ */
+function positionViewerButton(container, button) {
+    const image = container.querySelector('img');
+    if (!image
+        || typeof image.getBoundingClientRect !== 'function'
+        || typeof container.getBoundingClientRect !== 'function') {
+        return;
+    }
+
+    const imageRect = image.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    if (!imageRect.width || !imageRect.height || !containerRect.width || !containerRect.height) {
+        return;
+    }
+
+    const gapRight = Math.round(containerRect.right - imageRect.right);
+    const gapBottom = Math.round(containerRect.bottom - imageRect.bottom);
+    button.style.right = Math.max(VIEWER_INSET_PX, gapRight + VIEWER_INSET_PX) + 'px';
+    button.style.bottom = Math.max(VIEWER_INSET_PX, gapBottom + VIEWER_INSET_PX) + 'px';
+}
+
+/**
  * Builds the corner control that sits inside an image viewer.
  * @param {HTMLImageElement} image
  * @returns {Element}
@@ -2020,16 +2058,20 @@ function makeViewerDownloadButton(image) {
 }
 
 /**
- * Adds the corner download control to every open image viewer.
+ * Adds (and keeps positioned) the corner download control in every image viewer.
  *
  * Neither SillyTavern's chat lightbox (`expandMessageMedia`) nor the gallery's
  * floating image window ships one, and both are ordinary nodes in this document,
- * so a corner control is all it takes.
+ * so a corner control is all it takes. Running on every reconciler tick doubles
+ * as the repositioning pass: it catches late image layout, the click that toggles
+ * zoom, and window resizes without needing a ResizeObserver.
  */
 function enhanceImageViewers() {
     for (const selector of VIEWER_CONTAINER_SELECTORS) {
         for (const container of document.querySelectorAll(selector)) {
-            if (container.querySelector('.' + VIEWER_BUTTON_CLASS)) {
+            const existing = container.querySelector('.' + VIEWER_BUTTON_CLASS);
+            if (existing) {
+                positionViewerButton(container, existing);
                 continue;
             }
 
@@ -2039,9 +2081,78 @@ function enhanceImageViewers() {
             }
 
             container.classList.add(VIEWER_HOST_CLASS);
-            container.appendChild(makeViewerDownloadButton(image));
+            const button = makeViewerDownloadButton(image);
+            container.appendChild(button);
+            positionViewerButton(container, button);
+            image.addEventListener('load', () => positionViewerButton(container, button));
         }
     }
+}
+
+/**
+ * Repositions every viewer control after something a tick might miss.
+ * @param {Element} container
+ */
+function repositionViewerSoon(container) {
+    window.setTimeout(() => {
+        const button = container.querySelector('.' + VIEWER_BUTTON_CLASS);
+        if (button) {
+            positionViewerButton(container, button);
+        }
+    }, 0);
+}
+
+/**
+ * Keeps the corner control in step with a lightbox that is opening right now.
+ *
+ * The lightbox is created by a click we cannot hook into directly, so this runs
+ * a few short retries on top of the regular reconciler tick.
+ * @param {number} [attempt]
+ */
+function refreshViewersSoon(attempt = 0) {
+    enhanceImageViewers();
+    if (attempt >= 4) {
+        return;
+    }
+    window.setTimeout(() => refreshViewersSoon(attempt + 1), 120);
+}
+
+/**
+ * Reacts to the two clicks that open the chat image lightbox, and to the click
+ * that toggles zoom inside it (which resizes the image under our control).
+ */
+function installViewerHooks() {
+    document.addEventListener('click', (event) => {
+        const target = event.target;
+        if (!target || typeof target.closest !== 'function') {
+            return;
+        }
+
+        const opener = target.closest(LIGHTBOX_OPENER_SELECTOR);
+        if (opener) {
+            refreshViewersSoon();
+            return;
+        }
+
+        for (const selector of VIEWER_CONTAINER_SELECTORS) {
+            const viewer = target.closest(selector);
+            if (viewer) {
+                repositionViewerSoon(viewer);
+                return;
+            }
+        }
+    }, true);
+
+    window.addEventListener('resize', () => {
+        for (const selector of VIEWER_CONTAINER_SELECTORS) {
+            for (const container of document.querySelectorAll(selector)) {
+                const button = container.querySelector('.' + VIEWER_BUTTON_CLASS);
+                if (button) {
+                    positionViewerButton(container, button);
+                }
+            }
+        }
+    }, { passive: true });
 }
 
 /**
@@ -2060,7 +2171,7 @@ function hasCoarsePointer() {
 
 /**
  * Swallows the click that follows a long press, so the lightbox does not open
- * on top of the download that was just started.
+ * on top of the confirmation dialog.
  */
 function swallowNextClick() {
     const blocker = (event) => {
@@ -2076,21 +2187,92 @@ function swallowNextClick() {
 }
 
 /**
- * Arms "hold an image to download it" for the whole document.
- *
- * Delegated from `document` because images come and go with every re-render,
- * including inside the lightbox and the gallery.
+ * Cached promise for SillyTavern's popup module (`null` when unavailable).
+ * @type {Promise<any|null>|null}
  */
-function installLongPressDownload() {
-    if (!hasCoarsePointer()) {
+let hostPopupPromise = null;
+
+/**
+ * Loads the host's dialog module on demand, for the same reason the export
+ * module is loaded that way: a plain or older host may not have it, and a static
+ * import would take the whole extension down.
+ * @returns {Promise<any|null>}
+ */
+function loadHostPopupModule() {
+    if (!hostPopupPromise) {
+        hostPopupPromise = import('../../../popup.js')
+            .then((module) => (module && module.Popup ? module : null))
+            .catch((error) => {
+                log('host popup module unavailable', error);
+                return null;
+            });
+    }
+
+    return hostPopupPromise;
+}
+
+/**
+ * Gives a short buzz so the hold is acknowledged before the dialog appears.
+ */
+function pulseFeedback() {
+    if (typeof navigator.vibrate !== 'function') {
         return;
     }
 
+    try {
+        navigator.vibrate(30);
+    } catch (error) {
+        // Vibration is a nicety; ignore refusals.
+    }
+}
+
+/**
+ * Asks before saving, so a long press cannot fire by accident.
+ *
+ * When the host has no dialog module the download goes ahead anyway: the hold
+ * was deliberate, and silently doing nothing is the worse outcome.
+ *
+ * @returns {Promise<boolean>}
+ */
+async function confirmDownload() {
+    const module = await loadHostPopupModule();
+    const confirm = module && module.Popup && module.Popup.show
+        ? module.Popup.show.confirm
+        : null;
+    if (typeof confirm !== 'function') {
+        log('no confirmation dialog available, downloading right away');
+        return true;
+    }
+
+    try {
+        const answer = await confirm(
+            translateText('Download image'),
+            translateText('Save this image to your device?'),
+            {
+                okButton: translateText('Download'),
+                cancelButton: translateText('Cancel'),
+            },
+        );
+        return Boolean(answer);
+    } catch (error) {
+        log('confirmation dialog failed, downloading right away', error);
+        return true;
+    }
+}
+
+/**
+ * Arms "hold an image to download it" for the whole document.
+ *
+ * Delegated from `document` because images come and go with every re-render,
+ * including inside the lightbox and the gallery. The listeners are always
+ * installed; the touch-device check and the setting are evaluated per gesture so
+ * both stay effective without re-registering anything.
+ */
+function installLongPressDownload() {
     let timer = 0;
     let startX = 0;
     let startY = 0;
     let candidate = null;
-    let fired = false;
 
     const cancel = () => {
         if (timer) {
@@ -2124,7 +2306,10 @@ function installLongPressDownload() {
 
     document.addEventListener('touchstart', (event) => {
         cancel();
-        fired = false;
+        if (!getSettings().long_press_download || !hasCoarsePointer()) {
+            return;
+        }
+
         const touch = event.touches && event.touches[0];
         if (!touch) {
             return;
@@ -2140,16 +2325,15 @@ function installLongPressDownload() {
         const image = candidate;
         timer = window.setTimeout(() => {
             timer = 0;
-            fired = true;
-            if (typeof navigator.vibrate === 'function') {
-                try {
-                    navigator.vibrate(30);
-                } catch (error) {
-                    // Vibration is a nicety; ignore refusals.
-                }
-            }
+            pulseFeedback();
             swallowNextClick();
-            runDownloadAction(null, imageSourceForDownload(image)).catch((error) => {
+            confirmDownload().then((confirmed) => {
+                if (!confirmed) {
+                    log('long press download declined');
+                    return null;
+                }
+                return runDownloadAction(null, imageSourceForDownload(image));
+            }).catch((error) => {
                 console.error(DEBUG_PREFIX, 'long press download failed', error);
             });
         }, LONG_PRESS_MS);
@@ -2168,20 +2352,12 @@ function installLongPressDownload() {
     }, { passive: true });
 
     document.addEventListener('touchend', () => {
-        if (timer) {
-            cancel();
-        }
-        if (fired) {
-            fired = false;
-        }
+        cancel();
     }, { passive: true });
 
     document.addEventListener('touchcancel', () => {
         cancel();
-        fired = false;
     }, { passive: true });
-
-    log('long press download armed (touch device)');
 }
 
 /**
@@ -2209,89 +2385,6 @@ function markDownloadControl(control, state) {
     }
 
     icon.classList.add(DOWNLOAD_ICON_IDLE);
-}
-
-/**
- * Handles a click on the control injected into the host's media controls.
- * @param {MouseEvent} event
- * @returns {Promise<void>}
- */
-async function onDownloadControlClick(event) {
-    const control = event.currentTarget;
-    if (!control) {
-        return;
-    }
-
-    const container = control.closest('.mes_img_container') || control.parentElement;
-    const image = container ? container.querySelector('img') : null;
-    await runDownloadAction(control, image ? imageSourceForDownload(image) : '');
-}
-
-/**
- * Adds the download control to every rendered image, appending it to the
- * host's own media controls so it sits next to expand / caption / delete.
- *
- * The control is inserted once per image. When upstream ever ships its own
- * download button, the lookup below finds it and this becomes a no-op.
- */
-function enhanceImageContainers() {
-    const images = document.querySelectorAll('.mes_img_container');
-    for (const container of images) {
-        const controls = container.querySelector('.mes_img_controls');
-        if (!controls || controls.querySelector('.' + DOWNLOAD_BUTTON_CLASS)) {
-            continue;
-        }
-
-        const control = document.createElement('div');
-        control.className = 'right_menu_button fa-lg fa-solid ' + DOWNLOAD_ICON_IDLE + ' '
-            + DOWNLOAD_BUTTON_CLASS;
-        control.setAttribute('title', translateText('Download image'));
-        control.setAttribute('role', 'button');
-        control.setAttribute('tabindex', '0');
-        control.addEventListener('click', (event) => {
-            // Keep the host's message level click handlers out of this.
-            event.preventDefault();
-            event.stopPropagation();
-            onDownloadControlClick(event).catch((error) => {
-                console.error(DEBUG_PREFIX, 'download control failed', error);
-            });
-        });
-
-        controls.appendChild(control);
-    }
-
-    // The lightbox and the gallery's image window are separate surfaces.
-    enhanceImageViewers();
-}
-
-/**
- * Keeps the corner control in step with a lightbox that is opening right now.
- *
- * The lightbox is created by a click we cannot hook into directly, so this runs
- * a few short retries on top of the regular reconciler tick.
- * @param {number} [attempt]
- */
-function refreshViewersSoon(attempt = 0) {
-    enhanceImageViewers();
-    if (attempt >= 4) {
-        return;
-    }
-    window.setTimeout(() => refreshViewersSoon(attempt + 1), 120);
-}
-
-/**
- * Reacts to the two clicks that open the chat image lightbox.
- */
-function installViewerHooks() {
-    document.addEventListener('click', (event) => {
-        const target = event.target;
-        if (!target || typeof target.closest !== 'function') {
-            return;
-        }
-        if (target.closest(LIGHTBOX_OPENER_SELECTOR)) {
-            refreshViewersSoon();
-        }
-    }, true);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2349,6 +2442,13 @@ function renderSettingsPanel() {
         '    <small data-i18n="Paste an image into the message editor with Ctrl+V, or drag an image into the editor. The unsent input box behaves the same way.">' +
         '    在编辑框（铅笔图标）内按 Ctrl+V 粘贴，或把图片拖进编辑框；未送出的输入框同样有效。' +
         '    图片会存到 <code>user/images/&lt;角色名&gt;/</code>，与内置附件相同。</small>' +
+        '    <hr>' +
+        '    <label class="checkbox_label" for="tt_editpaste_long_press">' +
+        '      <input id="tt_editpaste_long_press" type="checkbox">' +
+        '      <span data-i18n="Hold an image on a touch screen to download it">触控装置上长按图片下载</span>' +
+        '    </label>' +
+        '    <small data-i18n="Holding an image asks for confirmation first, so it cannot fire by accident. Only applies on touch screens.">' +
+        '    长按图片会先弹出确认再下载，避免误触。只对触控屏幕有效。</small>' +
         '  </div>' +
         '</div>';
 
@@ -2361,6 +2461,7 @@ function renderSettingsPanel() {
     const limitEdgeInput = block.querySelector('#tt_editpaste_limit_edge');
     const maxEdgeInput = block.querySelector('#tt_editpaste_max_edge');
     const minQualityInput = block.querySelector('#tt_editpaste_min_quality');
+    const longPressInput = block.querySelector('#tt_editpaste_long_press');
 
     enabledInput.checked = settings.enabled;
     maxSizeInput.value = String(Math.round(settings.max_image_bytes / (1024 * 1024)));
@@ -2369,6 +2470,7 @@ function renderSettingsPanel() {
     limitEdgeInput.checked = settings.compress_limit_dimension;
     maxEdgeInput.value = String(settings.compress_max_edge);
     minQualityInput.value = String(settings.compress_min_quality);
+    longPressInput.checked = settings.long_press_download;
 
     const syncCompressionInputs = () => {
         const off = !settings.compress_enabled;
@@ -2418,6 +2520,10 @@ function renderSettingsPanel() {
     minQualityInput.addEventListener('change', () => {
         settings.compress_min_quality = readClampedNumber(minQualityInput, 0.1, 1, 0.5);
         minQualityInput.value = String(settings.compress_min_quality);
+        persist();
+    });
+    longPressInput.addEventListener('change', () => {
+        settings.long_press_download = longPressInput.checked;
         persist();
     });
 }
