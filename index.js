@@ -36,7 +36,7 @@ export const MODULE_NAME = 'edit-paste-image';
 export const DEBUG_PREFIX = '[EditPasteImage] ';
 
 /** Reported in the console and the settings drawer; kept in step with manifest.json. */
-export const EXTENSION_VERSION = '1.4.1';
+export const EXTENSION_VERSION = '1.4.2';
 
 /** Hard cap for a single pasted image (25 MB). */
 export const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
@@ -103,13 +103,19 @@ const DOWNLOAD_BLOB_TTL_MS = 30000;
 /** Paths that always belong to the local SillyTavern server. */
 const LOCAL_MEDIA_PATH_PREFIXES = ['/user/', '/thumbnails/', '/characters/', '/backgrounds/', '/api/'];
 
-/** Image attributes that hold the full size original, best first. */
-const IMAGE_SOURCE_ATTRS = ['data-ngsrc', 'data-src', 'src'];
+/** Attributes that hold the full size original, ahead of `src`. */
+const MEDIA_SOURCE_ATTRS = ['data-ngsrc', 'data-src'];
+
+/** Extensions a link must end in before we treat it as the media itself. */
+const MEDIA_FILE_RE = /\.(png|jpe?g|gif|webp|bmp|avif|svg|mp4|webm|mov|m4v|mkv)(?:[?#]|$)/i;
 
 /** Viewer surfaces that get a corner download control of their own. */
 const VIEWER_CONTAINER_SELECTORS = ['.img_enlarged_container', '.galleryImageDraggable'];
 const VIEWER_HOST_CLASS = 'tt-editpaste-viewer';
 const VIEWER_BUTTON_CLASS = 'tt-editpaste-viewer-download';
+
+/** The media kinds a viewer can hold: images, plus generated video. */
+const MEDIA_ELEMENT_SELECTOR = 'img, video';
 
 /** Gap (px) between the viewer control and the image's own bottom right corner. */
 const VIEWER_INSET_PX = 12;
@@ -125,7 +131,6 @@ const LONG_PRESS_SLOP_PX = 12;
 
 /** Images smaller than this are chrome (icons), not something worth saving. */
 const LONG_PRESS_MIN_EDGE = 64;
-
 /* ------------------------------------------------------------------ */
 /* settings                                                            */
 /* ------------------------------------------------------------------ */
@@ -1936,23 +1941,38 @@ function openImageLocation(src) {
 }
 
 /**
- * Picks the best URL to save for an image element.
+ * Picks the best URL to save for a media element.
  *
- * Galleries keep a thumbnail in `src` and the original in a data attribute, so
- * the data attributes win.
+ * Three sources, best first: a gallery's `data-ngsrc` (the original, when `src`
+ * holds a thumbnail), a wrapping link that points at a media file, and finally
+ * the element's own `src`.
  *
- * @param {HTMLImageElement} image
+ * Text-to-image results do not need any special handling here: they are ordinary
+ * `message.extra.media` entries with `source: 'generated'` and are rendered by
+ * the very same `#message_image_template` clone, so the same markup applies.
+ * Video results use `<video class="mes_video">` instead, which is why the
+ * selector below is not `img`-only.
+ *
+ * @param {HTMLImageElement|HTMLVideoElement} media
  * @returns {string}
  */
-function imageSourceForDownload(image) {
-    for (const attribute of IMAGE_SOURCE_ATTRS) {
-        const value = String(image.getAttribute(attribute) || '').trim();
+function mediaSourceForDownload(media) {
+    for (const attribute of MEDIA_SOURCE_ATTRS) {
+        const value = String(media.getAttribute(attribute) || '').trim();
         if (value) {
             return value;
         }
     }
 
-    return String(image.currentSrc || image.src || '').trim();
+    const link = typeof media.closest === 'function' ? media.closest('a[href]') : null;
+    const href = link ? String(link.getAttribute('href') || '').trim() : '';
+    if (href && MEDIA_FILE_RE.test(href)) {
+        return href;
+    }
+
+    return String(
+        media.getAttribute('src') || media.currentSrc || media.src || '',
+    ).trim();
 }
 
 /**
@@ -2015,31 +2035,31 @@ async function runDownloadAction(feedback, src) {
  * @param {Element} button
  */
 function positionViewerButton(container, button) {
-    const image = container.querySelector('img');
-    if (!image
-        || typeof image.getBoundingClientRect !== 'function'
+    const media = container.querySelector(MEDIA_ELEMENT_SELECTOR);
+    if (!media
+        || typeof media.getBoundingClientRect !== 'function'
         || typeof container.getBoundingClientRect !== 'function') {
         return;
     }
 
-    const imageRect = image.getBoundingClientRect();
+    const mediaRect = media.getBoundingClientRect();
     const containerRect = container.getBoundingClientRect();
-    if (!imageRect.width || !imageRect.height || !containerRect.width || !containerRect.height) {
+    if (!mediaRect.width || !mediaRect.height || !containerRect.width || !containerRect.height) {
         return;
     }
 
-    const gapRight = Math.round(containerRect.right - imageRect.right);
-    const gapBottom = Math.round(containerRect.bottom - imageRect.bottom);
+    const gapRight = Math.round(containerRect.right - mediaRect.right);
+    const gapBottom = Math.round(containerRect.bottom - mediaRect.bottom);
     button.style.right = Math.max(VIEWER_INSET_PX, gapRight + VIEWER_INSET_PX) + 'px';
     button.style.bottom = Math.max(VIEWER_INSET_PX, gapBottom + VIEWER_INSET_PX) + 'px';
 }
 
 /**
- * Builds the corner control that sits inside an image viewer.
- * @param {HTMLImageElement} image
+ * Builds the corner control that sits inside a viewer.
+ * @param {HTMLImageElement|HTMLVideoElement} media
  * @returns {Element}
  */
-function makeViewerDownloadButton(image) {
+function makeViewerDownloadButton(media) {
     const button = document.createElement('div');
     button.className = 'fa-solid fa-download ' + VIEWER_BUTTON_CLASS;
     button.setAttribute('title', translateText('Download image'));
@@ -2049,7 +2069,7 @@ function makeViewerDownloadButton(image) {
         // The lightbox closes on any click inside it, so this must not bubble.
         event.preventDefault();
         event.stopPropagation();
-        runDownloadAction(button, imageSourceForDownload(image)).catch((error) => {
+        runDownloadAction(button, mediaSourceForDownload(media)).catch((error) => {
             console.error(DEBUG_PREFIX, 'viewer download failed', error);
         });
     });
@@ -2058,13 +2078,13 @@ function makeViewerDownloadButton(image) {
 }
 
 /**
- * Adds (and keeps positioned) the corner download control in every image viewer.
+ * Adds (and keeps positioned) the corner download control in every media viewer.
  *
  * Neither SillyTavern's chat lightbox (`expandMessageMedia`) nor the gallery's
- * floating image window ships one, and both are ordinary nodes in this document,
- * so a corner control is all it takes. Running on every reconciler tick doubles
- * as the repositioning pass: it catches late image layout, the click that toggles
- * zoom, and window resizes without needing a ResizeObserver.
+ * floating window ships one, and both are ordinary nodes in this document, so a
+ * corner control is all it takes. Running on every reconciler tick doubles as the
+ * repositioning pass: it catches late media layout, the click that toggles zoom,
+ * and window resizes without needing a ResizeObserver.
  */
 function enhanceImageViewers() {
     for (const selector of VIEWER_CONTAINER_SELECTORS) {
@@ -2075,16 +2095,16 @@ function enhanceImageViewers() {
                 continue;
             }
 
-            const image = container.querySelector('img');
-            if (!image || !imageSourceForDownload(image)) {
+            const media = container.querySelector(MEDIA_ELEMENT_SELECTOR);
+            if (!media || !mediaSourceForDownload(media)) {
                 continue;
             }
 
             container.classList.add(VIEWER_HOST_CLASS);
-            const button = makeViewerDownloadButton(image);
+            const button = makeViewerDownloadButton(media);
             container.appendChild(button);
             positionViewerButton(container, button);
-            image.addEventListener('load', () => positionViewerButton(container, button));
+            media.addEventListener('load', () => positionViewerButton(container, button));
         }
     }
 }
@@ -2261,9 +2281,21 @@ async function confirmDownload() {
 }
 
 /**
+ * Reports the pixel size of a media element, for the "too small to be content"
+ * check. Images and videos expose it under different names.
+ * @param {HTMLImageElement|HTMLVideoElement} media
+ * @returns {{width: number, height: number}}
+ */
+function mediaPixelSize(media) {
+    const width = Number(media.naturalWidth) || Number(media.videoWidth) || 0;
+    const height = Number(media.naturalHeight) || Number(media.videoHeight) || 0;
+    return { width, height };
+}
+
+/**
  * Arms "hold an image to download it" for the whole document.
  *
- * Delegated from `document` because images come and go with every re-render,
+ * Delegated from `document` because media comes and goes with every re-render,
  * including inside the lightbox and the gallery. The listeners are always
  * installed; the touch-device check and the setting are evaluated per gesture so
  * both stay effective without re-registering anything.
@@ -2282,7 +2314,7 @@ function installLongPressDownload() {
         candidate = null;
     };
 
-    const imageFromTarget = (target) => {
+    const mediaFromTarget = (target) => {
         if (!target || typeof target.closest !== 'function') {
             return null;
         }
@@ -2290,18 +2322,21 @@ function installLongPressDownload() {
             return null;
         }
 
-        const image = target.tagName === 'IMG' ? target : target.closest('img');
-        if (!image) {
-            return null;
-        }
-        if (image.naturalWidth && image.naturalWidth < LONG_PRESS_MIN_EDGE) {
-            return null;
-        }
-        if (image.naturalHeight && image.naturalHeight < LONG_PRESS_MIN_EDGE) {
+        const tag = String(target.tagName || '').toUpperCase();
+        const media = tag === 'IMG' || tag === 'VIDEO' ? target : target.closest(MEDIA_ELEMENT_SELECTOR);
+        if (!media) {
             return null;
         }
 
-        return image;
+        const size = mediaPixelSize(media);
+        if (size.width && size.width < LONG_PRESS_MIN_EDGE) {
+            return null;
+        }
+        if (size.height && size.height < LONG_PRESS_MIN_EDGE) {
+            return null;
+        }
+
+        return media;
     };
 
     document.addEventListener('touchstart', (event) => {
@@ -2315,14 +2350,14 @@ function installLongPressDownload() {
             return;
         }
 
-        candidate = imageFromTarget(event.target);
+        candidate = mediaFromTarget(event.target);
         if (!candidate) {
             return;
         }
 
         startX = touch.clientX;
         startY = touch.clientY;
-        const image = candidate;
+        const media = candidate;
         timer = window.setTimeout(() => {
             timer = 0;
             pulseFeedback();
@@ -2332,7 +2367,7 @@ function installLongPressDownload() {
                     log('long press download declined');
                     return null;
                 }
-                return runDownloadAction(null, imageSourceForDownload(image));
+                return runDownloadAction(null, mediaSourceForDownload(media));
             }).catch((error) => {
                 console.error(DEBUG_PREFIX, 'long press download failed', error);
             });
