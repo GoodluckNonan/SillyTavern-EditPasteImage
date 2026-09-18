@@ -1,11 +1,11 @@
 /**
  * Edit Message Paste Image — styles.
  *
- * Two things need styling: the drag hover highlight, and the download control
- * that is appended to the host's own image controls. Everything is scoped under
- * `.tt-editpaste-*` so nothing leaks into the host UI. Uses ST's own CSS
- * variables with plain fallbacks for old WebViews (Android System WebView on
- * mobile builds).
+ * Two things need styling: the drag hover highlight, and the download controls
+ * (the one appended to the host's own image controls, plus the corner control
+ * inside an image viewer). Everything is scoped under `.tt-editpaste-*` so
+ * nothing leaks into the host UI. Uses ST's own CSS variables with plain
+ * fallbacks for old WebViews (Android System WebView on mobile builds).
  */
 
 .tt-editpaste-drag,
@@ -27,6 +27,49 @@
 .mes_img_controls .tt-editpaste-download[data-tt-editpaste-download="busy"] {
     pointer-events: none;
     opacity: 0.7;
+}
+
+/*
+ * The corner control inside an image viewer (chat lightbox / gallery window).
+ * The host element is made a positioning context; the control sits bottom right
+ * of it, well away from the viewer's own close button.
+ */
+.tt-editpaste-viewer {
+    position: relative;
+}
+
+.tt-editpaste-viewer > .tt-editpaste-viewer-download {
+    position: absolute;
+    right: 12px;
+    bottom: 12px;
+    z-index: 6;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.4em;
+    height: 2.4em;
+    border-radius: 50%;
+    cursor: pointer;
+    touch-action: manipulation;
+    opacity: 0.75;
+    color: var(--SmartThemeBodyColor, #fff);
+    background: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.55));
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+    transition: opacity var(--animation-duration, 0.2s) ease-in-out;
+}
+
+.tt-editpaste-viewer > .tt-editpaste-viewer-download:hover {
+    opacity: 1;
+}
+
+.tt-editpaste-viewer > .tt-editpaste-viewer-download[data-tt-editpaste-download="busy"] {
+    pointer-events: none;
+    opacity: 0.5;
+}
+
+.tt-editpaste-settings .tt-editpaste-version {
+    margin-left: 6px;
+    opacity: 0.6;
 }
 
 .tt-editpaste-settings .checkbox_label {

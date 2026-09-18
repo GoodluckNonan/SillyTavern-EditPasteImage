@@ -35,6 +35,9 @@ import { translate as translateString } from '../../../i18n.js';
 export const MODULE_NAME = 'edit-paste-image';
 export const DEBUG_PREFIX = '[EditPasteImage] ';
 
+/** Reported in the console and the settings drawer; kept in step with manifest.json. */
+export const EXTENSION_VERSION = '1.4.0';
+
 /** Hard cap for a single pasted image (25 MB). */
 export const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
 
@@ -100,6 +103,26 @@ const DOWNLOAD_BLOB_TTL_MS = 30000;
 
 /** Paths that always belong to the local SillyTavern server. */
 const LOCAL_MEDIA_PATH_PREFIXES = ['/user/', '/thumbnails/', '/characters/', '/backgrounds/', '/api/'];
+
+/** Image attributes that hold the full size original, best first. */
+const IMAGE_SOURCE_ATTRS = ['data-ngsrc', 'data-src', 'src'];
+
+/** Viewer surfaces that get a corner download control of their own. */
+const VIEWER_CONTAINER_SELECTORS = ['.img_enlarged_container', '.galleryImageDraggable'];
+const VIEWER_HOST_CLASS = 'tt-editpaste-viewer';
+const VIEWER_BUTTON_CLASS = 'tt-editpaste-viewer-download';
+
+/** Selectors whose click opens the chat image lightbox, so we can react to it. */
+const LIGHTBOX_OPENER_SELECTOR = '.mes_img, .mes_media_enlarge';
+
+/** Hold this long (ms) on an image to start a download. */
+const LONG_PRESS_MS = 600;
+
+/** A finger may drift this far (px) before the long press is cancelled. */
+const LONG_PRESS_SLOP_PX = 12;
+
+/** Images smaller than this are chrome (icons), not something worth saving. */
+const LONG_PRESS_MIN_EDGE = 64;
 
 /* ------------------------------------------------------------------ */
 /* settings                                                            */
@@ -218,11 +241,16 @@ function translateText(text) {
 
 /**
  * Shows a time limited toast through the host, translating the text first.
+ *
+ * Translation happens *before* the placeholders are filled, otherwise the filled
+ * string no longer matches the locale key and the toast stays English.
+ *
  * @param {'info'|'success'|'warning'|'error'} level
  * @param {string} message
+ * @param {...any} values values for `${0}`, `${1}`, …
  */
-function notify(level, message) {
-    const text = translateText(message);
+function notify(level, message, ...values) {
+    const text = fillPlaceholders(translateText(message), ...values);
     const ctx = safeContext();
     const hosts = [typeof toastr !== 'undefined' ? toastr : null, ctx ? ctx.toastr : null];
 
@@ -974,7 +1002,7 @@ export async function attachImageToMessage(messageId, file) {
 
     if (file.size > settings.max_image_bytes) {
         const limitMb = Math.round(settings.max_image_bytes / (1024 * 1024));
-        notify('warning', fillPlaceholders('Image is larger than ${0} MB and was not attached.', limitMb));
+        notify('warning', 'Image is larger than ${0} MB and was not attached.', limitMb);
         return false;
     }
 
@@ -1020,14 +1048,14 @@ export async function attachImageToMessage(messageId, file) {
         renderMessageMedia(ctx, messageId);
 
         if (prepared.compression) {
-            notify('success', fillPlaceholders('Image compressed to ${0}.', formatBytes(prepared.compression.bytes)));
+            notify('success', 'Image compressed to ${0}.', formatBytes(prepared.compression.bytes));
         }
 
         log('Attached image to message', messageId, uploadedUrl);
         return true;
     } catch (error) {
         console.error(DEBUG_PREFIX, 'Upload failed', error);
-        notify('error', fillPlaceholders('Image upload failed: ${0}', error && error.message ? error.message : error));
+        notify('error', 'Image upload failed: ${0}', error && error.message ? error.message : error);
         return false;
     }
 }
@@ -1211,13 +1239,14 @@ async function compressFiles(files, settings) {
  */
 function reportCompression(compressedCount, lastBytes) {
     if (compressedCount === 1) {
-        notify('success', fillPlaceholders('Image compressed to ${0}.', formatBytes(lastBytes)));
+        notify('success', 'Image compressed to ${0}.', formatBytes(lastBytes));
     } else if (compressedCount > 1) {
-        notify('success', fillPlaceholders(
+        notify(
+            'success',
             'Compressed ${0} images; the last one is ${1}.',
             compressedCount,
             formatBytes(lastBytes),
-        ));
+        );
     }
 }
 
@@ -1602,8 +1631,7 @@ async function readImageBlob(href) {
  * Frees a temporary download URL once the host has had time to pick it up.
  * @param {string} objectUrl
  */
-function releaseObjectUrl(objectUrl) {
-    if (!objectUrl) {
+function releaseObjectUrl(objectUrl) {    if (!objectUrl) {
         return;
     }
 
@@ -1683,20 +1711,59 @@ function clickDownloadAnchor(href, anchorHref, fileName, mode, objectUrl) {
 }
 
 /**
+ * Cached promise for TauriTavern's export module (`null` when this host has none).
+ *
+ * The promise itself is cached, not a "already tried" flag: two downloads started
+ * in the same tick must not race, with the loser silently dropping to the anchor
+ * route.
+ *
+ * @type {Promise<any|null>|null}
+ */
+let hostExportPromise = null;
+
+/**
+ * Loads TauriTavern's own export pipeline on demand.
+ *
+ * A plain SillyTavern has no `/scripts/file-export.js`, and a static import
+ * would take the whole extension down with it, so this stays a guarded dynamic
+ * import. It is the very module the host's built-in Exports use, which is what
+ * makes the native Android (MediaStore) and iOS (share sheet) paths work without
+ * depending on the anchor bridge.
+ *
+ * @returns {Promise<any|null>}
+ */
+function loadHostExportModule() {
+    if (!hostExportPromise) {
+        hostExportPromise = import('../../../file-export.js')
+            .then((module) => {
+                if (module && typeof module.downloadBlobWithRuntime === 'function') {
+                    log('using the host export pipeline for downloads');
+                    return module;
+                }
+                log('host file-export module exposes no downloadBlobWithRuntime');
+                return null;
+            })
+            .catch((error) => {
+                log('host file-export module unavailable, downloads fall back to an anchor', error);
+                return null;
+            });
+    }
+
+    return hostExportPromise;
+}
+
+/**
  * Downloads an image through the host's download bridge.
  *
- * The anchor carries a `download` attribute on purpose: on TauriTavern mobile
- * the host patches `HTMLAnchorElement.click`, tracks `URL.createObjectURL`
- * results and listens for download clicks at document level, routing them
- * through its native save flow (Android writes to the public Downloads folder or
- * opens the system save dialog, iOS opens the share sheet) with its own
- * success/failure toast. Everywhere else the browser simply saves the file,
- * which is the same thing a long press offers upstream.
+ * Two routes, tried in this order:
  *
- * A local URL is what that bridge expects, and the click has to stay inside the
- * user gesture, so that path never waits for anything. Only a URL that still
- * points somewhere else after normalisation is read into a blob first, because
- * the bridge refuses those outright.
+ * 1. TauriTavern's own export module (`/scripts/file-export.js`), the exact code
+ *    its built-in "Export" buttons use. It stages the bytes and calls the native
+ *    Android (MediaStore) / iOS (share sheet) bridge, so there is no anchor to be
+ *    intercepted and no origin rule to satisfy. Plain SillyTavern has no such
+ *    file, hence the guarded dynamic import.
+ * 2. Everywhere else: a synthetic `<a download>` click, which the browser saves
+ *    and which TauriTavern's `download-bridge.js` also intercepts on mobile.
  *
  * @param {string} url image URL (already served by the host)
  * @param {string} [name] optional file name
@@ -1710,12 +1777,43 @@ export async function downloadImageUrl(url, name) {
     }
 
     const fileName = fileNameFromImageUrl(name || source || href);
+    const host = await loadHostExportModule();
+    if (host) {
+        return downloadImageViaHost(host, href, fileName);
+    }
 
+    return downloadImageViaAnchor(href, fileName);
+}
+
+/**
+ * Fallback route: click a synthetic anchor and let the browser — or the host's
+ * anchor bridge — save it.
+ *
+ * Exported so it stays directly testable: on a TauriTavern host the route above
+ * always wins, and this one only runs on hosts without the export module.
+ *
+ * @param {string} url image URL
+ * @param {string} [name] optional file name
+ * @returns {Promise<{ok: boolean, bridged: boolean, url: string, name: string, mode: string}>}
+ */
+export async function downloadImageViaAnchor(url, name) {
+    const source = String(url || '').trim();
+    const href = normalizeDownloadHref(source);
+    if (!href) {
+        return { ok: false, bridged: false, url: href, name: '', mode: 'none' };
+    }
+
+    const fileName = fileNameFromImageUrl(name || source || href);
+
+    // A local URL is what the host bridge expects, and the click has to stay
+    // inside the user gesture, so this path never waits for anything.
     if (isSameOriginHref(href)) {
         log('Downloading image', fileName, 'from', href, '(direct)');
         return clickDownloadAnchor(href, href, fileName, 'direct');
     }
 
+    // Foreign URLs are refused by the host bridge, so fetch the bytes here and
+    // hand it a blob it can read straight out of memory.
     let objectUrl = '';
     const blob = await readImageBlob(href);
     if (blob) {
@@ -1733,13 +1831,52 @@ export async function downloadImageUrl(url, name) {
 }
 
 /**
+ * Hands the image to TauriTavern's own export pipeline.
+ * @param {any} host the `/scripts/file-export.js` module
+ * @param {string} href
+ * @param {string} fileName
+ * @returns {Promise<{ok: boolean, bridged: boolean, url: string, name: string, mode: string}>}
+ */
+async function downloadImageViaHost(host, href, fileName) {
+    const blob = await readImageBlob(href);
+    if (!blob) {
+        throw new Error('the image payload could not be read');
+    }
+
+    const result = await host.downloadBlobWithRuntime(blob, fileName, { fallbackName: fileName });
+    log('Host export finished', describeExportResult(result, fileName));
+    notify('success', 'Image saved: ${0}', describeExportResult(result, fileName));
+    return { ok: true, bridged: true, url: href, name: fileName, mode: 'host' };
+}
+
+/**
+ * Describes where the host put the file, for the confirmation toast.
+ * @param {any} result
+ * @param {string} fileName
+ * @returns {string}
+ */
+function describeExportResult(result, fileName) {
+    if (!result || typeof result !== 'object') {
+        return fileName;
+    }
+
+    const savedPath = typeof result.savedPath === 'string' ? result.savedPath.trim() : '';
+    if (savedPath) {
+        return savedPath;
+    }
+
+    const displayName = typeof result.displayName === 'string' ? result.displayName.trim() : '';
+    return displayName || fileName;
+}
+
+/**
  * Reports whether the app is a mobile Tauri shell, where a download that no host
  * bridge picked up would otherwise fail without any feedback at all.
  * @returns {boolean}
  */
 function isNativeMobileShell() {
     try {
-        if (!window.__TAURI_INTERNALS__ && !window.__TAURI__) {
+        if (!window.__TAURI_INTERNALS__ && !window.__TAURI__ && !window.__TAURI_RUNNING__) {
             return false;
         }
         const userAgent = String((window.navigator && window.navigator.userAgent) || '');
@@ -1747,6 +1884,304 @@ function isNativeMobileShell() {
     } catch (error) {
         return false;
     }
+}
+
+/**
+ * Opens the image itself, as a last resort when no download route worked.
+ *
+ * On TauriTavern this hands the URL to the system browser, where the image can
+ * be saved with the platform's own long press.
+ *
+ * @param {string} src
+ * @returns {boolean} true when something was opened
+ */
+function openImageLocation(src) {
+    const target = String(src || '').trim();
+    if (!target) {
+        return false;
+    }
+
+    let absolute = target;
+    try {
+        absolute = new URL(target, currentLocationHref() || undefined).href;
+    } catch (error) {
+        absolute = target;
+    }
+
+    try {
+        const tauri = window.__TAURI__;
+        if (tauri && tauri.opener && typeof tauri.opener.openUrl === 'function') {
+            tauri.opener.openUrl(absolute).catch((error) => {
+                console.error(DEBUG_PREFIX, 'opener failed', error);
+            });
+            return true;
+        }
+    } catch (error) {
+        console.error(DEBUG_PREFIX, 'opener unavailable', error);
+    }
+
+    try {
+        window.open(absolute, '_blank', 'noopener');
+        return true;
+    } catch (error) {
+        return false;
+    }
+}
+
+/**
+ * Picks the best URL to save for an image element.
+ *
+ * Galleries keep a thumbnail in `src` and the original in a data attribute, so
+ * the data attributes win.
+ *
+ * @param {HTMLImageElement} image
+ * @returns {string}
+ */
+function imageSourceForDownload(image) {
+    for (const attribute of IMAGE_SOURCE_ATTRS) {
+        const value = String(image.getAttribute(attribute) || '').trim();
+        if (value) {
+            return value;
+        }
+    }
+
+    return String(image.currentSrc || image.src || '').trim();
+}
+
+/**
+ * Runs a download and reports the outcome, whichever surface started it.
+ * @param {Element|null} feedback control to animate, when there is one
+ * @param {string} src
+ * @returns {Promise<void>}
+ */
+async function runDownloadAction(feedback, src) {
+    const source = String(src || '').trim();
+    if (!source) {
+        return;
+    }
+    if (feedback && feedback.getAttribute(DOWNLOAD_DONE_ATTR) === 'busy') {
+        return;
+    }
+
+    if (feedback) {
+        feedback.setAttribute(DOWNLOAD_DONE_ATTR, 'busy');
+        markDownloadControl(feedback, 'busy');
+    }
+
+    try {
+        const result = await downloadImageUrl(source);
+        if (feedback) {
+            markDownloadControl(feedback, 'done');
+        }
+        if (!result.ok) {
+            notify('error', 'Failed to download the image.');
+        } else if (!result.bridged && isNativeMobileShell()) {
+            console.error(DEBUG_PREFIX, 'the app did not take over the download', result);
+            notify('warning', 'The app did not take over the download. Update TauriTavern and try again.');
+        }
+    } catch (error) {
+        console.error(DEBUG_PREFIX, 'download failed', error);
+        const reason = error && error.message ? error.message : String(error);
+        if (openImageLocation(source)) {
+            notify('warning', 'Download failed: ${0} The image was opened instead.', reason);
+        } else {
+            notify('error', 'Failed to download the image: ${0}', reason);
+        }
+    } finally {
+        if (feedback) {
+            window.setTimeout(() => {
+                feedback.removeAttribute(DOWNLOAD_DONE_ATTR);
+            }, 1500);
+        }
+    }
+}
+
+/**
+ * Builds the corner control that sits inside an image viewer.
+ * @param {HTMLImageElement} image
+ * @returns {Element}
+ */
+function makeViewerDownloadButton(image) {
+    const button = document.createElement('div');
+    button.className = 'fa-solid fa-download ' + VIEWER_BUTTON_CLASS;
+    button.setAttribute('title', translateText('Download image'));
+    button.setAttribute('role', 'button');
+    button.setAttribute('tabindex', '0');
+    button.addEventListener('click', (event) => {
+        // The lightbox closes on any click inside it, so this must not bubble.
+        event.preventDefault();
+        event.stopPropagation();
+        runDownloadAction(button, imageSourceForDownload(image)).catch((error) => {
+            console.error(DEBUG_PREFIX, 'viewer download failed', error);
+        });
+    });
+
+    return button;
+}
+
+/**
+ * Adds the corner download control to every open image viewer.
+ *
+ * Neither SillyTavern's chat lightbox (`expandMessageMedia`) nor the gallery's
+ * floating image window ships one, and both are ordinary nodes in this document,
+ * so a corner control is all it takes.
+ */
+function enhanceImageViewers() {
+    for (const selector of VIEWER_CONTAINER_SELECTORS) {
+        for (const container of document.querySelectorAll(selector)) {
+            if (container.querySelector('.' + VIEWER_BUTTON_CLASS)) {
+                continue;
+            }
+
+            const image = container.querySelector('img');
+            if (!image || !imageSourceForDownload(image)) {
+                continue;
+            }
+
+            container.classList.add(VIEWER_HOST_CLASS);
+            container.appendChild(makeViewerDownloadButton(image));
+        }
+    }
+}
+
+/**
+ * Reports whether this device has a touch pointer, so the long press is only
+ * armed where it makes sense (a mouse long press would fight text selection).
+ * @returns {boolean}
+ */
+function hasCoarsePointer() {
+    try {
+        return typeof window.matchMedia === 'function'
+            && window.matchMedia('(pointer: coarse)').matches;
+    } catch (error) {
+        return false;
+    }
+}
+
+/**
+ * Swallows the click that follows a long press, so the lightbox does not open
+ * on top of the download that was just started.
+ */
+function swallowNextClick() {
+    const blocker = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        document.removeEventListener('click', blocker, true);
+    };
+
+    document.addEventListener('click', blocker, true);
+    window.setTimeout(() => {
+        document.removeEventListener('click', blocker, true);
+    }, 800);
+}
+
+/**
+ * Arms "hold an image to download it" for the whole document.
+ *
+ * Delegated from `document` because images come and go with every re-render,
+ * including inside the lightbox and the gallery.
+ */
+function installLongPressDownload() {
+    if (!hasCoarsePointer()) {
+        return;
+    }
+
+    let timer = 0;
+    let startX = 0;
+    let startY = 0;
+    let candidate = null;
+    let fired = false;
+
+    const cancel = () => {
+        if (timer) {
+            window.clearTimeout(timer);
+            timer = 0;
+        }
+        candidate = null;
+    };
+
+    const imageFromTarget = (target) => {
+        if (!target || typeof target.closest !== 'function') {
+            return null;
+        }
+        if (target.closest('.mes_img_controls, .mes_img_swipes, .tt-editpaste-viewer-download')) {
+            return null;
+        }
+
+        const image = target.tagName === 'IMG' ? target : target.closest('img');
+        if (!image) {
+            return null;
+        }
+        if (image.naturalWidth && image.naturalWidth < LONG_PRESS_MIN_EDGE) {
+            return null;
+        }
+        if (image.naturalHeight && image.naturalHeight < LONG_PRESS_MIN_EDGE) {
+            return null;
+        }
+
+        return image;
+    };
+
+    document.addEventListener('touchstart', (event) => {
+        cancel();
+        fired = false;
+        const touch = event.touches && event.touches[0];
+        if (!touch) {
+            return;
+        }
+
+        candidate = imageFromTarget(event.target);
+        if (!candidate) {
+            return;
+        }
+
+        startX = touch.clientX;
+        startY = touch.clientY;
+        const image = candidate;
+        timer = window.setTimeout(() => {
+            timer = 0;
+            fired = true;
+            if (typeof navigator.vibrate === 'function') {
+                try {
+                    navigator.vibrate(30);
+                } catch (error) {
+                    // Vibration is a nicety; ignore refusals.
+                }
+            }
+            swallowNextClick();
+            runDownloadAction(null, imageSourceForDownload(image)).catch((error) => {
+                console.error(DEBUG_PREFIX, 'long press download failed', error);
+            });
+        }, LONG_PRESS_MS);
+    }, { passive: true });
+
+    document.addEventListener('touchmove', (event) => {
+        const touch = event.touches && event.touches[0];
+        if (!touch) {
+            cancel();
+            return;
+        }
+        if (Math.abs(touch.clientX - startX) > LONG_PRESS_SLOP_PX
+            || Math.abs(touch.clientY - startY) > LONG_PRESS_SLOP_PX) {
+            cancel();
+        }
+    }, { passive: true });
+
+    document.addEventListener('touchend', () => {
+        if (timer) {
+            cancel();
+        }
+        if (fired) {
+            fired = false;
+        }
+    }, { passive: true });
+
+    document.addEventListener('touchcancel', () => {
+        cancel();
+        fired = false;
+    }, { passive: true });
+
+    log('long press download armed (touch device)');
 }
 
 /**
@@ -1777,45 +2212,19 @@ function markDownloadControl(control, state) {
 }
 
 /**
- * Handles a click on the injected download control.
+ * Handles a click on the control injected into the host's media controls.
  * @param {MouseEvent} event
  * @returns {Promise<void>}
  */
 async function onDownloadControlClick(event) {
     const control = event.currentTarget;
-    if (!control || control.getAttribute(DOWNLOAD_DONE_ATTR) === 'busy') {
+    if (!control) {
         return;
     }
 
     const container = control.closest('.mes_img_container') || control.parentElement;
     const image = container ? container.querySelector('img') : null;
-    const src = image ? String(image.getAttribute('src') || '') : '';
-    if (!src) {
-        return;
-    }
-
-    control.setAttribute(DOWNLOAD_DONE_ATTR, 'busy');
-    // Acknowledge the tap right away: the payload may have to be fetched first.
-    markDownloadControl(control, 'busy');
-
-    try {
-        const result = await downloadImageUrl(src);
-        if (result.ok && !result.bridged && isNativeMobileShell()) {
-            console.error(DEBUG_PREFIX, 'the app did not take over the download', result);
-            notify('warning', 'The app did not take over the download. Update TauriTavern and try again.');
-            markDownloadControl(control, 'idle');
-        } else {
-            markDownloadControl(control, 'done');
-        }
-    } catch (error) {
-        console.error(DEBUG_PREFIX, 'download failed', error);
-        notify('error', 'Failed to download the image.');
-        markDownloadControl(control, 'idle');
-    } finally {
-        window.setTimeout(() => {
-            control.removeAttribute(DOWNLOAD_DONE_ATTR);
-        }, 1500);
-    }
+    await runDownloadAction(control, image ? imageSourceForDownload(image) : '');
 }
 
 /**
@@ -1850,6 +2259,39 @@ function enhanceImageContainers() {
 
         controls.appendChild(control);
     }
+
+    // The lightbox and the gallery's image window are separate surfaces.
+    enhanceImageViewers();
+}
+
+/**
+ * Keeps the corner control in step with a lightbox that is opening right now.
+ *
+ * The lightbox is created by a click we cannot hook into directly, so this runs
+ * a few short retries on top of the regular reconciler tick.
+ * @param {number} [attempt]
+ */
+function refreshViewersSoon(attempt = 0) {
+    enhanceImageViewers();
+    if (attempt >= 4) {
+        return;
+    }
+    window.setTimeout(() => refreshViewersSoon(attempt + 1), 120);
+}
+
+/**
+ * Reacts to the two clicks that open the chat image lightbox.
+ */
+function installViewerHooks() {
+    document.addEventListener('click', (event) => {
+        const target = event.target;
+        if (!target || typeof target.closest !== 'function') {
+            return;
+        }
+        if (target.closest(LIGHTBOX_OPENER_SELECTOR)) {
+            refreshViewersSoon();
+        }
+    }, true);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1876,6 +2318,7 @@ function renderSettingsPanel() {
         '<div class="inline-drawer">' +
         '  <div class="inline-drawer-toggle inline-drawer-header">' +
         '    <b>Edit Message Paste Image</b>' +
+        '    <small class="tt-editpaste-version">v' + EXTENSION_VERSION + '</small>' +
         '    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>' +
         '  </div>' +
         '  <div class="inline-drawer-content">' +
@@ -2000,6 +2443,10 @@ export async function init() {
     // 1) the interval reconciler + the capture-phase safety net
     startSync();
 
+    // 1b) download surfaces: the lightbox corner control and "hold to download"
+    installViewerHooks();
+    installLongPressDownload();
+
     // 2) fresh chat -> no editor is open anymore
     if (ctx && ctx.eventSource && ctx.eventTypes) {
         const refresh = () => {
@@ -2036,12 +2483,17 @@ export async function init() {
 
     // 4) expose minimal hooks for power users / debugging in the console.
     globalThis.__ttEditPasteImage = {
+        version: EXTENSION_VERSION,
         attachImageToMessage,
         uploadImage,
         getSettings,
+        downloadImageUrl,
+        downloadImageViaAnchor,
+        openImageLocation,
     };
 
-    log('initialized — paste or drop an image into the message editor (pencil button)');
+    log('initialized v' + EXTENSION_VERSION
+        + ' — paste or drop an image into the message editor (pencil button)');
     return true;
 }
 
