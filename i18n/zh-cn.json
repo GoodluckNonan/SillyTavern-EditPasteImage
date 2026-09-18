@@ -22,6 +22,7 @@
     "This image is in another chat: ${0}. Switch to it and jump there?": "这张图片在另一个聊天「${0}」里。要切换过去并跳到那则消息吗？",
     "Switch": "切换",
     "Switched chats, but the message could not be found.": "已切换聊天，但找不到那则消息。",
+    "Could not jump to that chat: ${0}": "无法跳到那个聊天：${0}",
     "Searched the ${0} most recent chats of this character and did not find the image; older chats were not searched.": "已搜索这个角色最近的 ${0} 个聊天，没有找到这张图片；更旧的聊天没有搜索。",
     "Image not found": "找不到图片",
     "This image is not in any chat of this character, so the chat it came from may have been deleted. Delete the image from SillyTavern as well? This cannot be undone.": "找不到该图片所在的楼层，该对话可能已被删除。是否要将该图片也从 SillyTavern 里删除？（该操作不可复原）",

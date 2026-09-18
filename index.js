@@ -49,7 +49,7 @@ export const LEGACY_MODULE_NAME = 'edit-paste-image';
 export const DEBUG_PREFIX = '[PCD] ';
 
 /** Reported in the console and the settings drawer; kept in step with manifest.json. */
-export const EXTENSION_VERSION = '1.7.0';
+export const EXTENSION_VERSION = '1.8.0';
 
 /** Hard cap for a single pasted image (25 MB). */
 export const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
@@ -2487,8 +2487,9 @@ function currentChatFile() {
 }
 
 /**
- * The character whose gallery is open, in the shape the chat endpoints want.
- * @returns {{avatar: string, name: string}|null}
+ * The character currently selected in the chat, in the shape the chat endpoints
+ * want.
+ * @returns {{id: number, avatar: string, name: string}|null}
  */
 function currentCharacterIdentity() {
     const ctx = safeContext();
@@ -2506,7 +2507,48 @@ function currentCharacterIdentity() {
         return null;
     }
 
-    return { avatar: String(character.avatar), name: String(character.name || '') };
+    return { id, avatar: String(character.avatar), name: String(character.name || '') };
+}
+
+/**
+ * The character a media path belongs to.
+ *
+ * `user/images/<folder>/<file>` uses the character's avatar file name without its
+ * extension (`getCharaFilename`), so the folder is matched against
+ * `characters[].avatar`. This is what makes the search follow the *gallery's*
+ * folder picker: the gallery can be pointed at character B while the chat is
+ * still showing character A, and the jump has to look in B's chats.
+ *
+ * Falls back to the open character when the path carries no folder (for example
+ * an image saved straight into `user/images/`) or when nothing matches.
+ *
+ * @param {string} url
+ * @returns {{id: number, avatar: string, name: string}|null}
+ */
+function characterIdentityForMedia(url) {
+    const ctx = safeContext();
+    if (!ctx || !Array.isArray(ctx.characters)) {
+        return null;
+    }
+
+    const parts = mediaPathKey(url).split('/');
+    const folder = parts.length > 3 && parts[0] === 'user' && parts[1] === 'images' ? parts[2] : '';
+    if (!folder) {
+        return currentCharacterIdentity();
+    }
+
+    for (let id = 0; id < ctx.characters.length; id++) {
+        const character = ctx.characters[id];
+        if (!character || !character.avatar) {
+            continue;
+        }
+        if (String(character.avatar).replace(/\.[^/.]+$/, '') === folder) {
+            return { id, avatar: String(character.avatar), name: String(character.name || '') };
+        }
+    }
+
+    log('no character matches the image folder', folder, '- falling back to the open one');
+    return currentCharacterIdentity();
 }
 
 /**
@@ -2673,10 +2715,13 @@ function chatLabel(fileName) {
  *   complete: boolean, canSearch: boolean}>}
  */
 async function searchOtherChats(url) {
-    const identity = currentCharacterIdentity();
+    const identity = characterIdentityForMedia(url);
     if (!identity) {
-        log('no current character, skipping the cross-chat search');
-        return { found: false, fileName: '', label: '', searched: 0, complete: false, canSearch: false };
+        log('no character to search, skipping the cross-chat search');
+        return {
+            found: false, fileName: '', label: '', searched: 0,
+            complete: false, canSearch: false, identity: null,
+        };
     }
 
     let chats = [];
@@ -2684,7 +2729,10 @@ async function searchOtherChats(url) {
         chats = await listCharacterChats(identity);
     } catch (error) {
         log('could not list the character chats', error);
-        return { found: false, fileName: '', label: '', searched: 0, complete: false, canSearch: false };
+        return {
+            found: false, fileName: '', label: '', searched: 0,
+            complete: false, canSearch: false, identity,
+        };
     }
 
     const currentKey = chatFileKey(currentChatFile());
@@ -2713,6 +2761,7 @@ async function searchOtherChats(url) {
                 searched: index + 1,
                 complete: true,
                 canSearch: true,
+                identity,
             };
         }
     }
@@ -2724,7 +2773,38 @@ async function searchOtherChats(url) {
         searched: limit,
         complete: limit >= pending.length,
         canSearch: true,
+        identity,
     };
+}
+
+/**
+ * Selects the character a jump targets, when it is not the open one.
+ *
+ * The gallery can be pointed at another character's folder, and
+ * `openCharacterChat()` always works on the character that is currently selected.
+ *
+ * @param {any} ctx
+ * @param {{id: number, avatar: string, name: string}|null} identity
+ * @returns {Promise<boolean>}
+ */
+async function selectCharacterForJump(ctx, identity) {
+    if (!identity || Number(ctx.characterId) === identity.id) {
+        return true;
+    }
+
+    if (typeof ctx.selectCharacterById !== 'function') {
+        log('host cannot select another character');
+        return false;
+    }
+
+    try {
+        await ctx.selectCharacterById(identity.id);
+        log('selected character', identity.id, 'for the jump');
+        return true;
+    } catch (error) {
+        console.error(DEBUG_PREFIX, 'selecting the image\'s character failed', error);
+        return false;
+    }
 }
 
 /**
@@ -2755,23 +2835,31 @@ function closeViewerSurfaces(control) {
 
 /**
  * Switches to another chat file and jumps to the message showing the media.
+ *
+ * When the image belongs to a character other than the open one (the gallery can
+ * be pointed anywhere), that character is selected first, because
+ * `openCharacterChat()` only ever switches the selected character's chat.
+ *
  * @param {string} fileName
  * @param {string} url
  * @param {Element} [control] the jump control, so its windows can be closed
- * @returns {Promise<boolean>}
+ * @param {{id: number, avatar: string, name: string}|null} identity
+ * @returns {Promise<{ok: boolean, switched: boolean, error: Error|null}>}
  */
-async function switchToChatAndReveal(fileName, url, control) {
+async function switchToChatAndReveal(fileName, url, control, identity) {
     const ctx = safeContext();
     if (!ctx || typeof ctx.openCharacterChat !== 'function') {
-        log('host cannot switch chats');
-        return false;
+        return { ok: false, switched: false, error: new Error('the host cannot switch chats') };
+    }
+
+    if (!(await selectCharacterForJump(ctx, identity))) {
+        return { ok: false, switched: false, error: new Error('the host cannot select that character') };
     }
 
     try {
         await ctx.openCharacterChat(fileName);
     } catch (error) {
-        console.error(DEBUG_PREFIX, 'switching chats failed', error);
-        return false;
+        return { ok: false, switched: false, error: error instanceof Error ? error : new Error(String(error)) };
     }
 
     // The reader is now in another chat, so get the gallery out of the way
@@ -2783,13 +2871,13 @@ async function switchToChatAndReveal(fileName, url, control) {
         const messageId = findMessageIdForMedia(url);
         if (messageId !== null && revealMessage(messageId)) {
             log('Jumped to message', messageId, 'in', fileName);
-            return true;
+            return { ok: true, switched: true, error: null };
         }
         // eslint-disable-next-line no-await-in-loop -- polling on purpose
         await delay(CHAT_LOAD_POLL_MS);
     }
 
-    return false;
+    return { ok: false, switched: true, error: new Error('the message was not found in that chat') };
 }
 
 /**
@@ -2891,9 +2979,16 @@ async function runJumpToMessage(src, control) {
             return;
         }
 
-        const revealed = await switchToChatAndReveal(search.fileName, source, control);
-        if (!revealed) {
-            notify('warning', 'Switched chats, but the message could not be found.');
+        const outcome = await switchToChatAndReveal(search.fileName, source, control, search.identity);
+        if (!outcome.ok) {
+            if (outcome.switched) {
+                notify('warning', 'Switched chats, but the message could not be found.');
+            } else {
+                const reason = outcome.error && outcome.error.message
+                    ? outcome.error.message
+                    : String(outcome.error);
+                notify('error', 'Could not jump to that chat: ${0}', reason);
+            }
         }
         return;
     }
