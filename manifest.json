@@ -1,5 +1,5 @@
 {
-    "display_name": "Edit Message Paste Image",
+    "display_name": "PCD Extension",
     "loading_order": 100,
     "requires": [],
     "optional": [],
@@ -7,8 +7,8 @@
     "js": "index.js",
     "css": "style.css",
     "author": "GoodluckNonan",
-    "version": "1.4.2",
-    "homePage": "https://github.com/GoodluckNonan/SillyTavern-EditPasteImage",
+    "version": "1.5.0",
+    "homePage": "https://github.com/GoodluckNonan/SillyTavern-PCDExtension",
     "minimum_client_version": "1.12.0",
     "auto_update": false,
     "i18n": {

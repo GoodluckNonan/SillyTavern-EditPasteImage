@@ -1,9 +1,16 @@
 /**
- * Edit Message Paste Image
+ * PCD Extension — Paster / Compresser / Downloader
  * ------------------------------------------------------------------
- * Lets you paste an image straight into the *message edit* box
- * (the pencil / `.mes_edit` button), exactly like pasting into the
- * unsent-message box (`#send_textarea`) already works.
+ * Three things a chat image needs, in one frontend extension:
+ *
+ * 1. **Paster** — paste or drop an image straight into the *message edit* box
+ *    (the pencil / `.mes_edit` button), exactly like pasting into the
+ *    unsent-message box (`#send_textarea`) already works.
+ * 2. **Compresser** — optional: re-encode oversized images before upload so they
+ *    fit a size budget, without touching images that already fit.
+ * 3. **Downloader** — save an image (or a generated video) back out of the app:
+ *    a corner control inside the chat lightbox and the gallery window, plus
+ *    hold-to-save on touch screens.
  *
  * Upstream background:
  *  - Unsent box: `public/scripts/chats.js` binds a `paste` listener on
@@ -13,10 +20,9 @@
  *    `<textarea id="curEditTextarea" class="edit_textarea">` and there is
  *    **no** paste listener at all.
  *
- * This extension adds that missing listener. A pasted image is uploaded
- * through the standard `/api/images/upload` endpoint (the same one
- * `saveBase64AsFile()` uses for the built-in attachment button) and attached
- * to the message being edited as `message.extra.media[]` with
+ * A pasted image is uploaded through the standard `/api/images/upload` endpoint
+ * (the same one `saveBase64AsFile()` uses for the built-in attachment button) and
+ * attached to the message being edited as `message.extra.media[]` with
  * `source: 'upload'` + `inline_image: true` — the exact same data shape the
  * built-in "embed file into message" (`.mes_embed`) button produces, so the
  * chat file stays compatible with desktop SillyTavern.
@@ -31,12 +37,19 @@
 import { extension_settings, getContext } from '../../../extensions.js';
 import { translate as translateString } from '../../../i18n.js';
 
-/** Module id used for settings + logging prefixes. */
-export const MODULE_NAME = 'edit-paste-image';
-export const DEBUG_PREFIX = '[EditPasteImage] ';
+/** Key this extension stores its settings under. */
+export const MODULE_NAME = 'pcd-extension';
+
+/**
+ * Key the extension used before the 1.5.0 rename. Settings are moved over on
+ * first run so nobody loses their compression preferences.
+ */
+export const LEGACY_MODULE_NAME = 'edit-paste-image';
+
+export const DEBUG_PREFIX = '[PCD] ';
 
 /** Reported in the console and the settings drawer; kept in step with manifest.json. */
-export const EXTENSION_VERSION = '1.4.2';
+export const EXTENSION_VERSION = '1.5.0';
 
 /** Hard cap for a single pasted image (25 MB). */
 export const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
@@ -152,7 +165,15 @@ const DEFAULT_SETTINGS = {
  */
 export function getSettings() {
     if (!extension_settings[MODULE_NAME] || typeof extension_settings[MODULE_NAME] !== 'object') {
-        extension_settings[MODULE_NAME] = Object.assign({}, DEFAULT_SETTINGS);
+        // Carry settings over from the pre-rename key so the compression
+        // preferences of existing installs survive the 1.5.0 rename.
+        const legacy = extension_settings[LEGACY_MODULE_NAME];
+        const carried = legacy && typeof legacy === 'object' ? Object.assign({}, legacy) : null;
+        extension_settings[MODULE_NAME] = carried || Object.assign({}, DEFAULT_SETTINGS);
+        if (carried) {
+            delete extension_settings[LEGACY_MODULE_NAME];
+            log('migrated settings from the old "' + LEGACY_MODULE_NAME + '" key');
+        }
     }
 
     const settings = extension_settings[MODULE_NAME];
@@ -2445,11 +2466,14 @@ function renderSettingsPanel() {
     block.innerHTML =
         '<div class="inline-drawer">' +
         '  <div class="inline-drawer-toggle inline-drawer-header">' +
-        '    <b>Edit Message Paste Image</b>' +
+        '    <b>PCD Extension</b>' +
         '    <small class="tt-editpaste-version">v' + EXTENSION_VERSION + '</small>' +
         '    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>' +
         '  </div>' +
         '  <div class="inline-drawer-content">' +
+        '    <small data-i18n="Paster: paste or drop an image into the message editor. Compresser: automatically shrink oversized images before upload. Downloader: save an image from the image viewer or with a long press.">' +
+        '    贴图（Paster）：在编辑框粘贴／拖入图片。压缩（Compresser）：上传前自动缩小超标的图片。' +
+        '    下载（Downloader）：在图片检视器里存档，或长按图片下载。</small>' +
         '    <label class="checkbox_label" for="tt_editpaste_enabled">' +
         '      <input id="tt_editpaste_enabled" type="checkbox">' +
         '      <span data-i18n="Enable paste and drop in the message editor">启用编辑框粘贴／拖放</span>' +
@@ -2623,7 +2647,7 @@ export async function init() {
     renderSettingsPanel();
 
     // 4) expose minimal hooks for power users / debugging in the console.
-    globalThis.__ttEditPasteImage = {
+    globalThis.__pcd = {
         version: EXTENSION_VERSION,
         attachImageToMessage,
         uploadImage,

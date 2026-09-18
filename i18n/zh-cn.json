@@ -25,6 +25,7 @@
     "Minimum quality (lower bound)": "最低可接受画质",
     "Hold an image on a touch screen to download it": "触控装置上长按图片下载",
     "Images that are already within the size limit are left untouched. Compression re-encodes to WebP, falls back to JPEG when WebP is unsupported, and removes metadata such as EXIF. Quality is lowered first; the image is only scaled down when the lowest acceptable quality is still too large.": "图片不超过大小上限时不做任何处理。压缩会重新编码为 WebP（浏览器不支持时退回 JPEG），并清除 EXIF 等元数据。优先降低画质，只有当画质降到下限仍然超标时才会缩小尺寸。",
+    "Paster: paste or drop an image into the message editor. Compresser: automatically shrink oversized images before upload. Downloader: save an image from the image viewer or with a long press.": "贴图（Paster）：在编辑框粘贴／拖入图片。压缩（Compresser）：上传前自动缩小超标的图片。下载（Downloader）：在图片检视器里存档，或长按图片下载。",
     "Paste an image into the message editor with Ctrl+V, or drag an image into the editor. The unsent input box behaves the same way.": "在编辑框（铅笔图标）内按 Ctrl+V 粘贴，或把图片拖进编辑框；未送出的输入框同样有效。",
     "Holding an image asks for confirmation first, so it cannot fire by accident. Only applies on touch screens.": "长按图片会先弹出确认再下载，避免误触。只对触控屏幕有效。"
 }
