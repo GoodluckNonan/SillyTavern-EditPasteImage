@@ -49,7 +49,7 @@ export const LEGACY_MODULE_NAME = 'edit-paste-image';
 export const DEBUG_PREFIX = '[PCD] ';
 
 /** Reported in the console and the settings drawer; kept in step with manifest.json. */
-export const EXTENSION_VERSION = '1.5.1';
+export const EXTENSION_VERSION = '1.6.0';
 
 /** Hard cap for a single pasted image (25 MB). */
 export const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
@@ -122,15 +122,40 @@ const MEDIA_SOURCE_ATTRS = ['data-ngsrc', 'data-src'];
 /** Extensions a link must end in before we treat it as the media itself. */
 const MEDIA_FILE_RE = /\.(png|jpe?g|gif|webp|bmp|avif|svg|mp4|webm|mov|m4v|mkv)(?:[?#]|$)/i;
 
-/** Viewer surfaces that get a corner download control of their own. */
-const VIEWER_CONTAINER_SELECTORS = ['.img_enlarged_container', '.galleryImageDraggable'];
+/**
+ * Viewer surfaces and the corner controls each one gets.
+ *
+ * `right` is the downloader. `left` is the gallery-only "jump to the message
+ * this image came from" control: a chat lightbox is already *on* its message,
+ * so the jump only makes sense for the gallery's floating window.
+ */
+const VIEWER_SURFACES = [
+    { selector: '.img_enlarged_container', download: true, jump: false },
+    { selector: '.galleryImageDraggable', download: true, jump: true },
+];
+
+const VIEWER_CONTAINER_SELECTORS = VIEWER_SURFACES.map((surface) => surface.selector);
+
 const VIEWER_HOST_CLASS = 'tt-editpaste-viewer';
-const VIEWER_BUTTON_CLASS = 'tt-editpaste-viewer-download';
+const VIEWER_DOWNLOAD_CLASS = 'tt-editpaste-viewer-download';
+const VIEWER_JUMP_CLASS = 'tt-editpaste-viewer-jump';
+
+/** Which side each corner control is pinned to, for repositioning. */
+const VIEWER_CONTROLS = [
+    { className: VIEWER_DOWNLOAD_CLASS, side: 'right' },
+    { className: VIEWER_JUMP_CLASS, side: 'left' },
+];
+
+/** Briefly rings the message a gallery jump landed on. */
+const FLASH_CLASS = 'tt-editpaste-flash';
+
+/** How long that ring stays visible (ms), matching the CSS duration. */
+const FLASH_HOLD_MS = 1800;
 
 /** The media kinds a viewer can hold: images, plus generated video. */
 const MEDIA_ELEMENT_SELECTOR = 'img, video';
 
-/** Gap (px) between the viewer control and the image's own bottom right corner. */
+/** Gap (px) between a viewer control and the media's own corner. */
 const VIEWER_INSET_PX = 12;
 
 /** Selectors whose click opens the chat image lightbox, so we can react to it. */
@@ -2160,17 +2185,18 @@ async function runDownloadAction(feedback, src) {
 }
 
 /**
- * Pins a viewer control to the image's own bottom right corner.
+ * Pins a viewer control to the media's own corner.
  *
  * The viewer box is usually larger than the picture (letterboxing, `object-fit:
  * contain`), so anchoring to the box would leave the control floating away from
- * the image. Offsets are measured against the image instead, and clamped to the
- * viewer so that a zoomed-in image never pushes the control out of sight.
+ * the media. Offsets are measured against the media instead, and clamped to the
+ * viewer so that a zoomed-in picture never pushes the control out of sight.
  *
  * @param {Element} container
- * @param {Element} button
+ * @param {Element} control
+ * @param {'left'|'right'} side
  */
-function positionViewerButton(container, button) {
+function positionViewerControl(container, control, side) {
     const media = container.querySelector(MEDIA_ELEMENT_SELECTOR);
     if (!media
         || typeof media.getBoundingClientRect !== 'function'
@@ -2184,10 +2210,30 @@ function positionViewerButton(container, button) {
         return;
     }
 
-    const gapRight = Math.round(containerRect.right - mediaRect.right);
     const gapBottom = Math.round(containerRect.bottom - mediaRect.bottom);
-    button.style.right = Math.max(VIEWER_INSET_PX, gapRight + VIEWER_INSET_PX) + 'px';
-    button.style.bottom = Math.max(VIEWER_INSET_PX, gapBottom + VIEWER_INSET_PX) + 'px';
+    control.style.bottom = Math.max(VIEWER_INSET_PX, gapBottom + VIEWER_INSET_PX) + 'px';
+
+    if (side === 'left') {
+        const gapLeft = Math.round(mediaRect.left - containerRect.left);
+        control.style.left = Math.max(VIEWER_INSET_PX, gapLeft + VIEWER_INSET_PX) + 'px';
+        return;
+    }
+
+    const gapRight = Math.round(containerRect.right - mediaRect.right);
+    control.style.right = Math.max(VIEWER_INSET_PX, gapRight + VIEWER_INSET_PX) + 'px';
+}
+
+/**
+ * Repositions every control that is actually in this viewer.
+ * @param {Element} container
+ */
+function repositionViewer(container) {
+    for (const entry of VIEWER_CONTROLS) {
+        const control = container.querySelector('.' + entry.className);
+        if (control) {
+            positionViewerControl(container, control, entry.side);
+        }
+    }
 }
 
 /**
@@ -2197,7 +2243,7 @@ function positionViewerButton(container, button) {
  */
 function makeViewerDownloadButton(media) {
     const button = document.createElement('div');
-    button.className = 'fa-solid fa-download ' + VIEWER_BUTTON_CLASS;
+    button.className = 'fa-solid fa-download ' + VIEWER_DOWNLOAD_CLASS;
     button.setAttribute('title', translateText('Download image'));
     button.setAttribute('role', 'button');
     button.setAttribute('tabindex', '0');
@@ -2214,33 +2260,73 @@ function makeViewerDownloadButton(media) {
 }
 
 /**
- * Adds (and keeps positioned) the corner download control in every media viewer.
+ * Builds the gallery-only "go to the message this came from" control.
+ * @param {HTMLImageElement|HTMLVideoElement} media
+ * @returns {Element}
+ */
+function makeViewerJumpButton(media) {
+    const button = document.createElement('div');
+    button.className = 'fa-solid fa-location-arrow ' + VIEWER_JUMP_CLASS;
+    button.setAttribute('title', translateText('Jump to the message with this image'));
+    button.setAttribute('role', 'button');
+    button.setAttribute('tabindex', '0');
+    button.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        runJumpToMessage(mediaSourceForDownload(media)).catch((error) => {
+            console.error(DEBUG_PREFIX, 'jump to message failed', error);
+        });
+    });
+
+    return button;
+}
+
+/**
+ * Adds one corner control to a viewer, or just repositions it when it is there.
+ * @param {Element} container
+ * @param {HTMLImageElement|HTMLVideoElement} media
+ * @param {string} className
+ * @param {'left'|'right'} side
+ * @param {(media: any) => Element} build
+ */
+function ensureViewerControl(container, media, className, side, build) {
+    const existing = container.querySelector('.' + className);
+    if (existing) {
+        positionViewerControl(container, existing, side);
+        return;
+    }
+
+    const control = build(media);
+    container.appendChild(control);
+    positionViewerControl(container, control, side);
+    media.addEventListener('load', () => positionViewerControl(container, control, side));
+}
+
+/**
+ * Adds (and keeps positioned) the corner controls in every media viewer.
  *
  * Neither SillyTavern's chat lightbox (`expandMessageMedia`) nor the gallery's
- * floating window ships one, and both are ordinary nodes in this document, so a
+ * floating window ships any, and both are ordinary nodes in this document, so a
  * corner control is all it takes. Running on every reconciler tick doubles as the
  * repositioning pass: it catches late media layout, the click that toggles zoom,
  * and window resizes without needing a ResizeObserver.
  */
 function enhanceImageViewers() {
-    for (const selector of VIEWER_CONTAINER_SELECTORS) {
-        for (const container of document.querySelectorAll(selector)) {
-            const existing = container.querySelector('.' + VIEWER_BUTTON_CLASS);
-            if (existing) {
-                positionViewerButton(container, existing);
-                continue;
-            }
-
+    for (const surface of VIEWER_SURFACES) {
+        for (const container of document.querySelectorAll(surface.selector)) {
             const media = container.querySelector(MEDIA_ELEMENT_SELECTOR);
             if (!media || !mediaSourceForDownload(media)) {
                 continue;
             }
 
             container.classList.add(VIEWER_HOST_CLASS);
-            const button = makeViewerDownloadButton(media);
-            container.appendChild(button);
-            positionViewerButton(container, button);
-            media.addEventListener('load', () => positionViewerButton(container, button));
+
+            if (surface.download) {
+                ensureViewerControl(container, media, VIEWER_DOWNLOAD_CLASS, 'right', makeViewerDownloadButton);
+            }
+            if (surface.jump) {
+                ensureViewerControl(container, media, VIEWER_JUMP_CLASS, 'left', makeViewerJumpButton);
+            }
         }
     }
 }
@@ -2250,12 +2336,7 @@ function enhanceImageViewers() {
  * @param {Element} container
  */
 function repositionViewerSoon(container) {
-    window.setTimeout(() => {
-        const button = container.querySelector('.' + VIEWER_BUTTON_CLASS);
-        if (button) {
-            positionViewerButton(container, button);
-        }
-    }, 0);
+    window.setTimeout(() => repositionViewer(container), 0);
 }
 
 /**
@@ -2271,6 +2352,174 @@ function refreshViewersSoon(attempt = 0) {
         return;
     }
     window.setTimeout(() => refreshViewersSoon(attempt + 1), 120);
+}
+
+/**
+ * Normalises a media URL so a gallery path and a message URL compare equal.
+ *
+ * The gallery serves `user/images/<folder>/<file>` while the message stores
+ * `/user/images/<name>/<file>`, and either may carry a query or percent escapes.
+ *
+ * @param {string} url
+ * @returns {string}
+ */
+function mediaPathKey(url) {
+    let value = String(url || '').trim();
+    if (!value) {
+        return '';
+    }
+
+    try {
+        value = new URL(value, currentLocationHref() || 'https://localhost/').pathname;
+    } catch (error) {
+        value = value.split('?')[0].split('#')[0];
+    }
+
+    try {
+        value = decodeURIComponent(value);
+    } catch (error) {
+        // Leave malformed percent escapes alone rather than dropping the value.
+    }
+
+    return value.replace(/^\/+/, '');
+}
+
+/**
+ * Finds the message that shows this media, so the chat can jump to it.
+ *
+ * An exact path match wins. When nothing matches, the bare file name is accepted
+ * if it is unique across the chat, so a gallery that serves the same file under a
+ * slightly different path still lands somewhere sensible.
+ *
+ * @param {string} url
+ * @returns {number|null} message id, or null when the chat does not show it
+ */
+function findMessageIdForMedia(url) {
+    const key = mediaPathKey(url);
+    if (!key) {
+        return null;
+    }
+
+    const ctx = safeContext();
+    const chat = ctx && Array.isArray(ctx.chat) ? ctx.chat : null;
+    if (!chat) {
+        return null;
+    }
+
+    const base = key.split('/').pop();
+    let byBaseName = null;
+    let byBaseNameCount = 0;
+
+    for (let id = 0; id < chat.length; id++) {
+        const message = chat[id];
+        const media = message && message.extra && Array.isArray(message.extra.media)
+            ? message.extra.media
+            : [];
+
+        for (const entry of media) {
+            const entryKey = mediaPathKey(entry && entry.url);
+            if (!entryKey) {
+                continue;
+            }
+            if (entryKey === key) {
+                return id;
+            }
+            if (entryKey.split('/').pop() === base) {
+                byBaseName = id;
+                byBaseNameCount++;
+            }
+        }
+    }
+
+    return byBaseNameCount === 1 ? byBaseName : null;
+}
+
+/**
+ * Scrolls the chat to a message and rings it for a moment.
+ * @param {number} messageId
+ * @returns {boolean} true when the message was found in the DOM
+ */
+function revealMessage(messageId) {
+    const selector = '.mes[mesid="' + messageId + '"]';
+    const node = document.querySelector('#chat ' + selector) || document.querySelector(selector);
+    if (!node) {
+        return false;
+    }
+
+    if (typeof node.scrollIntoView === 'function') {
+        try {
+            node.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        } catch (error) {
+            log('smooth scroll refused, jumping directly', error);
+            node.scrollIntoView();
+        }
+    }
+
+    node.classList.add(FLASH_CLASS);
+    window.setTimeout(() => node.classList.remove(FLASH_CLASS), FLASH_HOLD_MS);
+    return true;
+}
+
+/**
+ * Asks before leaving the gallery for the chat.
+ *
+ * The jump throws away whatever the reader was scrolled to, so it is worth one
+ * confirmation. When the host has no dialog module the jump goes ahead: the tap
+ * was deliberate.
+ *
+ * @returns {Promise<boolean>}
+ */
+async function confirmJumpToMessage() {
+    const module = await loadHostPopupModule();
+    const confirm = module && module.Popup && module.Popup.show
+        ? module.Popup.show.confirm
+        : null;
+    if (typeof confirm !== 'function') {
+        log('no confirmation dialog available, jumping right away');
+        return true;
+    }
+
+    try {
+        const answer = await confirm(
+            translateText('Jump to the image'),
+            translateText('About to jump to the message this image came from.'),
+            {
+                okButton: translateText('Jump'),
+                cancelButton: translateText('Cancel'),
+            },
+        );
+        return Boolean(answer);
+    } catch (error) {
+        log('jump confirmation failed, jumping right away', error);
+        return true;
+    }
+}
+
+/**
+ * Gallery-only: leaves the viewer for the chat message the image came from.
+ *
+ * @param {string} src the media URL shown in the gallery viewer
+ * @returns {Promise<void>}
+ */
+async function runJumpToMessage(src) {
+    const messageId = findMessageIdForMedia(src);
+    if (messageId === null) {
+        notify('warning', 'This image is not attached to any message in the current chat.');
+        return;
+    }
+
+    const confirmed = await confirmJumpToMessage();
+    if (!confirmed) {
+        log('jump to message declined');
+        return;
+    }
+
+    if (!revealMessage(messageId)) {
+        notify('warning', 'This image is not attached to any message in the current chat.');
+        return;
+    }
+
+    log('Jumped to message', messageId, 'for', src);
 }
 
 /**
@@ -2302,10 +2551,7 @@ function installViewerHooks() {
     window.addEventListener('resize', () => {
         for (const selector of VIEWER_CONTAINER_SELECTORS) {
             for (const container of document.querySelectorAll(selector)) {
-                const button = container.querySelector('.' + VIEWER_BUTTON_CLASS);
-                if (button) {
-                    positionViewerButton(container, button);
-                }
+                repositionViewer(container);
             }
         }
     }, { passive: true });

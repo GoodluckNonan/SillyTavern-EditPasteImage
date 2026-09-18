@@ -1,10 +1,11 @@
 /**
- * Edit Message Paste Image — styles.
+ * PCD Extension — styles.
  *
- * Two things need styling: the drag hover highlight, and the corner download
- * control inside an image viewer. Everything is scoped under `.tt-editpaste-*`
- * so nothing leaks into the host UI. Uses ST's own CSS variables with plain
- * fallbacks for old WebViews (Android System WebView on mobile builds).
+ * Three things need styling: the drag hover highlight, the corner controls inside
+ * an image viewer (download on the right, gallery-only jump on the left), and the
+ * ring that marks the message a jump landed on. Everything is scoped under
+ * `.tt-editpaste-*` so nothing leaks into the host UI. Uses ST's own CSS variables
+ * with plain fallbacks for old WebViews (Android System WebView on mobile builds).
  */
 
 .tt-editpaste-drag,
@@ -14,18 +15,18 @@
 }
 
 /*
- * The corner control inside an image viewer (chat lightbox / gallery window).
- * The viewer becomes the positioning context; `right` / `bottom` are then
- * overwritten from JS with the offsets of the image's own bottom right corner,
- * so the defaults here only matter for the very first frame.
+ * The corner controls inside an image viewer (chat lightbox / gallery window).
+ * The viewer becomes the positioning context; `left` / `right` / `bottom` are
+ * then overwritten from JS with the offsets of the media's own corners, so the
+ * defaults here only matter for the very first frame.
  */
 .tt-editpaste-viewer {
     position: relative;
 }
 
-.tt-editpaste-viewer > .tt-editpaste-viewer-download {
+.tt-editpaste-viewer > .tt-editpaste-viewer-download,
+.tt-editpaste-viewer > .tt-editpaste-viewer-jump {
     position: absolute;
-    right: 12px;
     bottom: 12px;
     z-index: 6;
     display: flex;
@@ -43,13 +44,31 @@
     transition: opacity var(--animation-duration, 0.2s) ease-in-out;
 }
 
-.tt-editpaste-viewer > .tt-editpaste-viewer-download:hover {
+.tt-editpaste-viewer > .tt-editpaste-viewer-download {
+    right: 12px;
+}
+
+.tt-editpaste-viewer > .tt-editpaste-viewer-jump {
+    left: 12px;
+}
+
+.tt-editpaste-viewer > .tt-editpaste-viewer-download:hover,
+.tt-editpaste-viewer > .tt-editpaste-viewer-jump:hover {
     opacity: 1;
 }
 
 .tt-editpaste-viewer > .tt-editpaste-viewer-download[data-tt-editpaste-download="busy"] {
     pointer-events: none;
     opacity: 0.5;
+}
+
+/*
+ * Rings the message a gallery jump landed on. JS adds and removes the class; the
+ * duration in the stylesheet is cosmetic, `FLASH_HOLD_MS` controls how long.
+ */
+.tt-editpaste-flash {
+    border-radius: 6px;
+    box-shadow: 0 0 0 2px var(--SmartThemeQuoteColor, #7aa2f7);
 }
 
 .tt-editpaste-settings .tt-editpaste-version {
