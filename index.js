@@ -49,7 +49,7 @@ export const LEGACY_MODULE_NAME = 'edit-paste-image';
 export const DEBUG_PREFIX = '[PCD] ';
 
 /** Reported in the console and the settings drawer; kept in step with manifest.json. */
-export const EXTENSION_VERSION = '1.6.0';
+export const EXTENSION_VERSION = '1.7.0';
 
 /** Hard cap for a single pasted image (25 MB). */
 export const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
@@ -151,6 +151,13 @@ const FLASH_CLASS = 'tt-editpaste-flash';
 
 /** How long that ring stays visible (ms), matching the CSS duration. */
 const FLASH_HOLD_MS = 1800;
+
+/** How many of a character's chats the cross-chat search will read. */
+const CROSS_CHAT_SEARCH_LIMIT = 200;
+
+/** Waiting for a freshly opened chat to render: how often, and how many times. */
+const CHAT_LOAD_POLL_MS = 200;
+const CHAT_LOAD_POLL_TRIES = 20;
 
 /** The media kinds a viewer can hold: images, plus generated video. */
 const MEDIA_ELEMENT_SELECTOR = 'img, video';
@@ -2273,7 +2280,7 @@ function makeViewerJumpButton(media) {
     button.addEventListener('click', (event) => {
         event.preventDefault();
         event.stopPropagation();
-        runJumpToMessage(mediaSourceForDownload(media)).catch((error) => {
+        runJumpToMessage(mediaSourceForDownload(media), button).catch((error) => {
             console.error(DEBUG_PREFIX, 'jump to message failed', error);
         });
     });
@@ -2395,14 +2402,24 @@ function mediaPathKey(url) {
  * @returns {number|null} message id, or null when the chat does not show it
  */
 function findMessageIdForMedia(url) {
-    const key = mediaPathKey(url);
-    if (!key) {
-        return null;
-    }
-
     const ctx = safeContext();
     const chat = ctx && Array.isArray(ctx.chat) ? ctx.chat : null;
-    if (!chat) {
+    return findMessageIdInMessages(chat, url);
+}
+
+/**
+ * Finds the id of the message in `messages` that shows this media.
+ *
+ * Entries without a `mes` string are skipped, which conveniently also skips the
+ * chat header that `/api/chats/get` puts at index 0.
+ *
+ * @param {any[]} messages
+ * @param {string} url
+ * @returns {number|null}
+ */
+function findMessageIdInMessages(messages, url) {
+    const key = mediaPathKey(url);
+    if (!key || !Array.isArray(messages)) {
         return null;
     }
 
@@ -2410,9 +2427,13 @@ function findMessageIdForMedia(url) {
     let byBaseName = null;
     let byBaseNameCount = 0;
 
-    for (let id = 0; id < chat.length; id++) {
-        const message = chat[id];
-        const media = message && message.extra && Array.isArray(message.extra.media)
+    for (let id = 0; id < messages.length; id++) {
+        const message = messages[id];
+        if (!message || typeof message.mes !== 'string') {
+            continue;
+        }
+
+        const media = message.extra && Array.isArray(message.extra.media)
             ? message.extra.media
             : [];
 
@@ -2432,6 +2453,71 @@ function findMessageIdForMedia(url) {
     }
 
     return byBaseNameCount === 1 ? byBaseName : null;
+}
+
+/**
+ * Normalises a chat file name for comparison; the endpoints accept it with or
+ * without the `.jsonl` suffix.
+ * @param {string} fileName
+ * @returns {string}
+ */
+function chatFileKey(fileName) {
+    return String(fileName || '').trim().replace(/\.jsonl$/i, '');
+}
+
+/**
+ * The chat file that is open right now, if the host exposes it.
+ * @returns {string}
+ */
+function currentChatFile() {
+    const ctx = safeContext();
+    if (!ctx) {
+        return '';
+    }
+
+    try {
+        if (typeof ctx.getCurrentChatId === 'function') {
+            return String(ctx.getCurrentChatId() || '');
+        }
+    } catch (error) {
+        log('getCurrentChatId failed', error);
+    }
+
+    return String(ctx.chatId || '');
+}
+
+/**
+ * The character whose gallery is open, in the shape the chat endpoints want.
+ * @returns {{avatar: string, name: string}|null}
+ */
+function currentCharacterIdentity() {
+    const ctx = safeContext();
+    if (!ctx || !Array.isArray(ctx.characters)) {
+        return null;
+    }
+
+    const id = Number(ctx.characterId);
+    if (!Number.isFinite(id) || id < 0) {
+        return null;
+    }
+
+    const character = ctx.characters[id];
+    if (!character || !character.avatar) {
+        return null;
+    }
+
+    return { avatar: String(character.avatar), name: String(character.name || '') };
+}
+
+/**
+ * Waits for the requested time. Kept separate so tests can see the loop shape.
+ * @param {number} ms
+ * @returns {Promise<void>}
+ */
+function delay(ms) {
+    return new Promise((resolve) => {
+        window.setTimeout(resolve, ms);
+    });
 }
 
 /**
@@ -2461,65 +2547,371 @@ function revealMessage(messageId) {
 }
 
 /**
- * Asks before leaving the gallery for the chat.
+ * Shows a host confirmation dialog.
  *
- * The jump throws away whatever the reader was scrolled to, so it is worth one
- * confirmation. When the host has no dialog module the jump goes ahead: the tap
- * was deliberate.
+ * Returns `true` when the host has no dialog module, or when it fails: every
+ * caller is a deliberate tap, and silently doing nothing is the worse outcome.
  *
+ * @param {string} title already translated
+ * @param {string} message already translated
+ * @param {string} okLabel already translated
  * @returns {Promise<boolean>}
  */
-async function confirmJumpToMessage() {
+async function confirmWithHost(title, message, okLabel) {
     const module = await loadHostPopupModule();
     const confirm = module && module.Popup && module.Popup.show
         ? module.Popup.show.confirm
         : null;
     if (typeof confirm !== 'function') {
-        log('no confirmation dialog available, jumping right away');
+        log('no confirmation dialog available, going ahead');
         return true;
     }
 
     try {
-        const answer = await confirm(
-            translateText('Jump to the image'),
-            translateText('About to jump to the message this image came from.'),
-            {
-                okButton: translateText('Jump'),
-                cancelButton: translateText('Cancel'),
-            },
-        );
+        const answer = await confirm(title, message, {
+            okButton: okLabel,
+            cancelButton: translateText('Cancel'),
+        });
         return Boolean(answer);
     } catch (error) {
-        log('jump confirmation failed, jumping right away', error);
+        log('confirmation dialog failed, going ahead', error);
         return true;
+    }
+}
+
+/**
+ * Reads the chat files belonging to a character.
+ * @param {{avatar: string, name: string}} identity
+ * @returns {Promise<any[]>}
+ */
+async function listCharacterChats(identity) {
+    const ctx = safeContext();
+    if (!ctx || typeof ctx.getRequestHeaders !== 'function') {
+        return [];
+    }
+
+    const response = await fetch('/api/characters/chats', {
+        method: 'POST',
+        headers: ctx.getRequestHeaders(),
+        body: JSON.stringify({ avatar_url: identity.avatar, ch_name: identity.name }),
+    });
+    if (!response.ok) {
+        throw new Error('listing chats failed: ' + response.status);
+    }
+
+    const data = await response.json();
+    return Array.isArray(data) ? data : [];
+}
+
+/**
+ * Reads one chat file's messages.
+ * @param {{avatar: string, name: string}} identity
+ * @param {string} fileName
+ * @returns {Promise<any[]>}
+ */
+async function readCharacterChat(identity, fileName) {
+    const ctx = safeContext();
+    if (!ctx || typeof ctx.getRequestHeaders !== 'function') {
+        return [];
+    }
+
+    const response = await fetch('/api/chats/get', {
+        method: 'POST',
+        headers: ctx.getRequestHeaders(),
+        body: JSON.stringify({
+            ch_name: identity.name,
+            file_name: fileName,
+            avatar_url: identity.avatar,
+            allow_not_found: false,
+        }),
+    });
+    if (!response.ok) {
+        throw new Error('reading chat failed: ' + response.status);
+    }
+
+    const data = await response.json();
+    return Array.isArray(data) ? data : [];
+}
+
+/**
+ * Sorts a chat listing newest first, when the host gives us a timestamp.
+ * @param {any} chat
+ * @returns {number}
+ */
+function chatTimestamp(chat) {
+    const raw = chat && (chat.last_mes || chat.last_message_date);
+    const parsed = Date.parse(String(raw || ''));
+    if (!Number.isNaN(parsed)) {
+        return parsed;
+    }
+
+    const numeric = Number(raw);
+    return Number.isFinite(numeric) ? numeric : 0;
+}
+
+/**
+ * Shortens `Character - 2024-12-22@12h37m57s.jsonl` to the part worth reading.
+ * @param {string} fileName
+ * @returns {string}
+ */
+function chatLabel(fileName) {
+    const key = chatFileKey(fileName);
+    const dash = key.indexOf(' - ');
+    return dash === -1 ? key : key.slice(dash + 3);
+}
+
+/**
+ * Looks for the media in the character's other chat files.
+ *
+ * The chat listing is searched newest first and stops at the first hit. The
+ * result reports whether the search was exhaustive, because the caller only
+ * offers to delete the file when it was: a capped search is not proof that
+ * nothing references the image.
+ *
+ * @param {string} url
+ * @returns {Promise<{found: boolean, fileName: string, label: string, searched: number,
+ *   complete: boolean, canSearch: boolean}>}
+ */
+async function searchOtherChats(url) {
+    const identity = currentCharacterIdentity();
+    if (!identity) {
+        log('no current character, skipping the cross-chat search');
+        return { found: false, fileName: '', label: '', searched: 0, complete: false, canSearch: false };
+    }
+
+    let chats = [];
+    try {
+        chats = await listCharacterChats(identity);
+    } catch (error) {
+        log('could not list the character chats', error);
+        return { found: false, fileName: '', label: '', searched: 0, complete: false, canSearch: false };
+    }
+
+    const currentKey = chatFileKey(currentChatFile());
+    const pending = chats
+        .filter((chat) => chat && chat.file_name && chatFileKey(chat.file_name) !== currentKey)
+        .sort((a, b) => chatTimestamp(b) - chatTimestamp(a));
+
+    const limit = Math.min(pending.length, CROSS_CHAT_SEARCH_LIMIT);
+
+    for (let index = 0; index < limit; index++) {
+        const chat = pending[index];
+        let messages = [];
+        try {
+            // eslint-disable-next-line no-await-in-loop -- sequential on purpose
+            messages = await readCharacterChat(identity, chat.file_name);
+        } catch (error) {
+            log('could not read chat', chat.file_name, error);
+            continue;
+        }
+
+        if (findMessageIdInMessages(messages, url) !== null) {
+            return {
+                found: true,
+                fileName: String(chat.file_name),
+                label: chatLabel(chat.file_name),
+                searched: index + 1,
+                complete: true,
+                canSearch: true,
+            };
+        }
+    }
+
+    return {
+        found: false,
+        fileName: '',
+        label: '',
+        searched: limit,
+        complete: limit >= pending.length,
+        canSearch: true,
+    };
+}
+
+/**
+ * Closes the windows that would otherwise sit on top of the message we jump to.
+ *
+ * Switching chats only replaces `#chat`; the gallery and its floating image
+ * window live in `#movingDivs` and would stay open over the message, hiding the
+ * thing we just jumped to. The gallery is closed through its own close button so
+ * the host keeps owning that state (and its wand-button toggle).
+ *
+ * @param {Element} [control] the jump control we were invoked from
+ */
+function closeViewerSurfaces(control) {
+    const floating = control && typeof control.closest === 'function'
+        ? control.closest('.galleryImageDraggable')
+        : null;
+    if (floating && typeof floating.remove === 'function') {
+        floating.remove();
+        log('closed the gallery image window');
+    }
+
+    const galleryClose = document.getElementById('galleryclose');
+    if (galleryClose && typeof galleryClose.click === 'function') {
+        galleryClose.click();
+        log('closed the gallery');
+    }
+}
+
+/**
+ * Switches to another chat file and jumps to the message showing the media.
+ * @param {string} fileName
+ * @param {string} url
+ * @param {Element} [control] the jump control, so its windows can be closed
+ * @returns {Promise<boolean>}
+ */
+async function switchToChatAndReveal(fileName, url, control) {
+    const ctx = safeContext();
+    if (!ctx || typeof ctx.openCharacterChat !== 'function') {
+        log('host cannot switch chats');
+        return false;
+    }
+
+    try {
+        await ctx.openCharacterChat(fileName);
+    } catch (error) {
+        console.error(DEBUG_PREFIX, 'switching chats failed', error);
+        return false;
+    }
+
+    // The reader is now in another chat, so get the gallery out of the way
+    // before scrolling: it would otherwise cover the message.
+    closeViewerSurfaces(control);
+
+    // The chat is printed asynchronously, so give it a few frames to appear.
+    for (let attempt = 0; attempt < CHAT_LOAD_POLL_TRIES; attempt++) {
+        const messageId = findMessageIdForMedia(url);
+        if (messageId !== null && revealMessage(messageId)) {
+            log('Jumped to message', messageId, 'in', fileName);
+            return true;
+        }
+        // eslint-disable-next-line no-await-in-loop -- polling on purpose
+        await delay(CHAT_LOAD_POLL_MS);
+    }
+
+    return false;
+}
+
+/**
+ * Builds the served path the delete endpoints expect.
+ *
+ * The gallery hands out `user/images/...` with no leading slash while the chat
+ * stores `/user/images/...`, and `/api/images/delete` keys off that leading slash
+ * to pick its route.
+ *
+ * @param {string} url
+ * @returns {string}
+ */
+function servedDeletePath(url) {
+    const value = String(url || '').trim().split('?')[0].split('#')[0];
+    if (!value) {
+        return '';
+    }
+    return value.startsWith('/') ? value : '/' + value;
+}
+
+/**
+ * Nothing references the image any more (or nothing we could read does), so offer
+ * to clean up the orphaned file.
+ *
+ * @param {string} url
+ * @returns {Promise<void>}
+ */
+async function offerImageDeletion(url) {
+    const target = servedDeletePath(url);
+    if (target.indexOf('/user/') !== 0) {
+        // Not a local upload: nothing of the host's to delete.
+        notify('warning', 'This image is not attached to any message in the current chat.');
+        return;
+    }
+
+    const confirmed = await confirmWithHost(
+        translateText('Image not found'),
+        translateText('This image is not in any chat of this character, so the chat it came from may have been deleted. Delete the image from SillyTavern as well? This cannot be undone.'),
+        translateText('Delete'),
+    );
+    if (!confirmed) {
+        log('image deletion declined');
+        return;
+    }
+
+    const deleted = await deleteUploadedFile(target);
+    if (deleted) {
+        notify('success', 'Image deleted.');
+    } else {
+        notify('error', 'Could not delete the image.');
     }
 }
 
 /**
  * Gallery-only: leaves the viewer for the chat message the image came from.
  *
+ * Three steps, cheapest first: the chat that is already open, then the current
+ * character's other chat files, and finally the offer to delete an image that
+ * nothing references any more.
+ *
  * @param {string} src the media URL shown in the gallery viewer
+ * @param {Element} [control] the jump control that was pressed
  * @returns {Promise<void>}
  */
-async function runJumpToMessage(src) {
-    const messageId = findMessageIdForMedia(src);
-    if (messageId === null) {
-        notify('warning', 'This image is not attached to any message in the current chat.');
+async function runJumpToMessage(src, control) {
+    const source = String(src || '').trim();
+    if (!source) {
         return;
     }
 
-    const confirmed = await confirmJumpToMessage();
-    if (!confirmed) {
-        log('jump to message declined');
+    const here = findMessageIdForMedia(source);
+    if (here !== null) {
+        const confirmed = await confirmWithHost(
+            translateText('Jump to the image'),
+            translateText('About to jump to the message this image came from.'),
+            translateText('Jump'),
+        );
+        if (confirmed && !revealMessage(here)) {
+            notify('warning', 'This image is not attached to any message in the current chat.');
+        }
         return;
     }
 
-    if (!revealMessage(messageId)) {
-        notify('warning', 'This image is not attached to any message in the current chat.');
+    notify('info', 'Searching the other chats of this character…');
+    const search = await searchOtherChats(source);
+
+    if (search.found) {
+        const question = fillPlaceholders(
+            translateText('This image is in another chat: ${0}. Switch to it and jump there?'),
+            search.label,
+        );
+        const confirmed = await confirmWithHost(
+            translateText('Jump to the image'),
+            question,
+            translateText('Switch'),
+        );
+        if (!confirmed) {
+            log('chat switch declined');
+            return;
+        }
+
+        const revealed = await switchToChatAndReveal(search.fileName, source, control);
+        if (!revealed) {
+            notify('warning', 'Switched chats, but the message could not be found.');
+        }
         return;
     }
 
-    log('Jumped to message', messageId, 'for', src);
+    if (!search.canSearch || !search.complete) {
+        if (search.canSearch) {
+            notify(
+                'warning',
+                'Searched the ${0} most recent chats of this character and did not find the image; older chats were not searched.',
+                search.searched,
+            );
+        } else {
+            notify('warning', 'This image is not attached to any message in the current chat.');
+        }
+        return;
+    }
+
+    await offerImageDeletion(source);
 }
 
 /**
@@ -2630,36 +3022,14 @@ function pulseFeedback() {
 
 /**
  * Asks before saving, so a long press cannot fire by accident.
- *
- * When the host has no dialog module the download goes ahead anyway: the hold
- * was deliberate, and silently doing nothing is the worse outcome.
- *
  * @returns {Promise<boolean>}
  */
-async function confirmDownload() {
-    const module = await loadHostPopupModule();
-    const confirm = module && module.Popup && module.Popup.show
-        ? module.Popup.show.confirm
-        : null;
-    if (typeof confirm !== 'function') {
-        log('no confirmation dialog available, downloading right away');
-        return true;
-    }
-
-    try {
-        const answer = await confirm(
-            translateText('Download image'),
-            translateText('Save this image to your device?'),
-            {
-                okButton: translateText('Download'),
-                cancelButton: translateText('Cancel'),
-            },
-        );
-        return Boolean(answer);
-    } catch (error) {
-        log('confirmation dialog failed, downloading right away', error);
-        return true;
-    }
+function confirmDownload() {
+    return confirmWithHost(
+        translateText('Download image'),
+        translateText('Save this image to your device?'),
+        translateText('Download'),
+    );
 }
 
 /**
