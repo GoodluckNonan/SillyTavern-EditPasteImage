@@ -49,7 +49,7 @@ export const LEGACY_MODULE_NAME = 'edit-paste-image';
 export const DEBUG_PREFIX = '[PCD] ';
 
 /** Reported in the console and the settings drawer; kept in step with manifest.json. */
-export const EXTENSION_VERSION = '1.8.0';
+export const EXTENSION_VERSION = '1.8.1';
 
 /** Hard cap for a single pasted image (25 MB). */
 export const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
@@ -158,6 +158,13 @@ const CROSS_CHAT_SEARCH_LIMIT = 200;
 /** Waiting for a freshly opened chat to render: how often, and how many times. */
 const CHAT_LOAD_POLL_MS = 200;
 const CHAT_LOAD_POLL_TRIES = 20;
+
+/**
+ * Re-asserting the scroll after a chat switch: the host prints the messages and
+ * then scrolls to the bottom, so the jump has to outlast that.
+ */
+const CHAT_SETTLE_MS = 250;
+const CHAT_SETTLE_TRIES = 12;
 
 /** The media kinds a viewer can hold: images, plus generated video. */
 const MEDIA_ELEMENT_SELECTOR = 'img, video';
@@ -2563,29 +2570,127 @@ function delay(ms) {
 }
 
 /**
+ * The rendered element of a message.
+ * @param {number} messageId
+ * @returns {Element|null}
+ */
+function messageNode(messageId) {
+    const selector = '.mes[mesid="' + messageId + '"]';
+    return document.querySelector('#chat ' + selector) || document.querySelector(selector);
+}
+
+/**
+ * Scrolls a message into view.
+ * @param {Element} node
+ * @param {boolean} smooth animate the scroll (only safe when nothing else is scrolling)
+ */
+function scrollMessageIntoView(node, smooth) {
+    if (typeof node.scrollIntoView !== 'function') {
+        return;
+    }
+
+    if (!smooth) {
+        node.scrollIntoView({ block: 'center' });
+        return;
+    }
+
+    try {
+        node.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    } catch (error) {
+        log('smooth scroll refused, jumping directly', error);
+        node.scrollIntoView();
+    }
+}
+
+/**
+ * Rings a message for a moment.
+ * @param {Element} node
+ */
+function flashMessage(node) {
+    node.classList.add(FLASH_CLASS);
+    window.setTimeout(() => node.classList.remove(FLASH_CLASS), FLASH_HOLD_MS);
+}
+
+/**
+ * Reports whether a message currently sits inside the chat's visible area.
+ *
+ * Without layout information (a hidden chat, or a test double) this answers
+ * `true`: there is nothing to fight over, so the scroll can be called done.
+ *
+ * @param {Element} node
+ * @returns {boolean}
+ */
+function isMessageVisible(node) {
+    if (typeof node.getBoundingClientRect !== 'function') {
+        return true;
+    }
+
+    const rect = node.getBoundingClientRect();
+    if (!rect.height) {
+        return true;
+    }
+
+    const chat = document.getElementById('chat');
+    const bounds = chat && typeof chat.getBoundingClientRect === 'function'
+        ? chat.getBoundingClientRect()
+        : null;
+    const top = bounds && bounds.height ? bounds.top : 0;
+    const bottom = bounds && bounds.height ? bounds.bottom : Infinity;
+
+    return rect.bottom > top && rect.top < bottom;
+}
+
+/**
  * Scrolls the chat to a message and rings it for a moment.
  * @param {number} messageId
  * @returns {boolean} true when the message was found in the DOM
  */
 function revealMessage(messageId) {
-    const selector = '.mes[mesid="' + messageId + '"]';
-    const node = document.querySelector('#chat ' + selector) || document.querySelector(selector);
+    const node = messageNode(messageId);
     if (!node) {
         return false;
     }
 
-    if (typeof node.scrollIntoView === 'function') {
-        try {
-            node.scrollIntoView({ block: 'center', behavior: 'smooth' });
-        } catch (error) {
-            log('smooth scroll refused, jumping directly', error);
-            node.scrollIntoView();
+    scrollMessageIntoView(node, true);
+    flashMessage(node);
+    return true;
+}
+
+/**
+ * Scrolls to a message and keeps it there until the host stops moving the chat.
+ *
+ * Opening a chat makes SillyTavern print every message and then scroll to the
+ * bottom (and again once the media has loaded). A single `scrollIntoView` right
+ * after the switch loses that race, which looks like "it jumped and then snapped
+ * back to the newest message". So the scroll is re-asserted until the message has
+ * stayed in view across two consecutive checks, or the budget runs out.
+ *
+ * @param {number} messageId
+ * @returns {Promise<boolean>} true once the message is settled in view
+ */
+async function revealMessageSettled(messageId) {
+    let settled = 0;
+
+    for (let attempt = 0; attempt < CHAT_SETTLE_TRIES; attempt++) {
+        const node = messageNode(messageId);
+        if (!node) {
+            settled = 0;
+        } else if (isMessageVisible(node)) {
+            settled++;
+            if (settled >= 2) {
+                flashMessage(node);
+                return true;
+            }
+        } else {
+            settled = 0;
+            scrollMessageIntoView(node, false);
         }
+
+        // eslint-disable-next-line no-await-in-loop -- settling on purpose
+        await delay(CHAT_SETTLE_MS);
     }
 
-    node.classList.add(FLASH_CLASS);
-    window.setTimeout(() => node.classList.remove(FLASH_CLASS), FLASH_HOLD_MS);
-    return true;
+    return false;
 }
 
 /**
@@ -2816,14 +2921,19 @@ async function selectCharacterForJump(ctx, identity) {
  * the host keeps owning that state (and its wand-button toggle).
  *
  * @param {Element} [control] the jump control we were invoked from
+ * @param {boolean} [closeGallery] also close the gallery window
  */
-function closeViewerSurfaces(control) {
+function closeViewerSurfaces(control, closeGallery) {
     const floating = control && typeof control.closest === 'function'
         ? control.closest('.galleryImageDraggable')
         : null;
     if (floating && typeof floating.remove === 'function') {
         floating.remove();
         log('closed the gallery image window');
+    }
+
+    if (!closeGallery) {
+        return;
     }
 
     const galleryClose = document.getElementById('galleryclose');
@@ -2864,14 +2974,19 @@ async function switchToChatAndReveal(fileName, url, control, identity) {
 
     // The reader is now in another chat, so get the gallery out of the way
     // before scrolling: it would otherwise cover the message.
-    closeViewerSurfaces(control);
+    closeViewerSurfaces(control, true);
 
-    // The chat is printed asynchronously, so give it a few frames to appear.
+    // Wait for the newly opened chat to render, then hold the scroll until the
+    // host is done scrolling to the bottom itself.
     for (let attempt = 0; attempt < CHAT_LOAD_POLL_TRIES; attempt++) {
         const messageId = findMessageIdForMedia(url);
-        if (messageId !== null && revealMessage(messageId)) {
-            log('Jumped to message', messageId, 'in', fileName);
-            return { ok: true, switched: true, error: null };
+        if (messageId !== null) {
+            const settled = await revealMessageSettled(messageId);
+            return {
+                ok: settled,
+                switched: true,
+                error: settled ? null : new Error('the message could not be brought into view'),
+            };
         }
         // eslint-disable-next-line no-await-in-loop -- polling on purpose
         await delay(CHAT_LOAD_POLL_MS);
@@ -2955,7 +3070,13 @@ async function runJumpToMessage(src, control) {
             translateText('About to jump to the message this image came from.'),
             translateText('Jump'),
         );
-        if (confirmed && !revealMessage(here)) {
+        if (!confirmed) {
+            return;
+        }
+
+        // Both windows would cover the message we just scrolled to.
+        closeViewerSurfaces(control, true);
+        if (!revealMessage(here)) {
             notify('warning', 'This image is not attached to any message in the current chat.');
         }
         return;
